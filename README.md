@@ -1,30 +1,27 @@
-# Simplified Byzantine Fault Tolerance (BFT) for Distributed Ledger
+# Simplified BFT cho Distributed Ledger
 
-## Mô tả
+Mo phong co che dong thuan **Byzantine Fault Tolerance (BFT)** don gian hoa
+cho Distributed Ledger, su dung thu vien `multiprocessing` cua Python.
 
-Chương trình mô phỏng cơ chế đồng thuận **Byzantine Fault Tolerance (BFT)**
-đơn giản hóa cho một Distributed Ledger, sử dụng thư viện `multiprocessing`
-của Python.
+## Kien truc
 
-## Kiến trúc
+- **4 nut (site)**, moi nut la mot tien trinh doc lap.
+- **Site 0**: Nut doc hai luon gui phieu ABORT.
+- **Site 1, 2, 3**: Nut trung thuc, gui phieu COMMIT.
+- **Quy tac 3f+1** (f=1): Can >= 3 phieu COMMIT de dat dong thuan.
 
-- **4 nút (site)**, mỗi nút là một tiến trình độc lập.
-- **Site 0**: Nút độc hại luôn gửi phiếu ABORT.
-- **Site 1, 2, 3**: Nút trung thực, gửi phiếu COMMIT.
-- **Quy tắc 3f+1** (f=1): Cần ≥ 3 phiếu COMMIT để đạt đồng thuận.
+## Kich ban mo phong
 
-## Kịch bản mô phỏng
+1. Tat ca 4 nut nhan giao dich va broadcast phieu bau.
+2. Site 2 broadcast COMMIT thanh cong, sau do crash ngay lap tuc.
+3. Site 0, 1, 3 thu thap du 4 phieu (3 COMMIT + 1 ABORT) -> COMMIT.
+4. Site 2 duoc khoi dong lai, doc log phat hien trang thai READY -> vao che do phuc hoi.
+5. Site 2 gui **REQUEST_VOTES** den cac nut con song.
+6. Site 0, 1, 3 gui lai phieu cua minh (**VOTE_RESPONSE**).
+7. Site 2 nhan du phieu, dem duoc 3 COMMIT -> COMMIT.
+8. Ket qua: Tat ca 3 nut trung thuc deu COMMIT.
 
-1. Tất cả 4 nút nhận giao dịch và broadcast phiếu bầu.
-2. Site 2 broadcast COMMIT thành công, sau đó **crash** ngay lập tức.
-3. Site 0, 1, 3 thu thập đủ 4 phiếu (3 COMMIT + 1 ABORT) → **COMMIT**.
-4. Site 2 được khởi động lại, đọc log phát hiện trạng thái READY → vào chế độ phục hồi.
-5. Site 2 gửi **REQUEST_VOTES** đến các nút còn sống.
-6. Site 0, 1, 3 gửi lại phiếu của mình (**VOTE_RESPONSE**).
-7. Site 2 nhận đủ phiếu, đếm được 3 COMMIT → **COMMIT**.
-8. Kết quả: Tất cả 3 nút trung thực đều COMMIT.
-
-## Cách chạy
+## Cach chay
 
 ```bash
 python main.py
@@ -32,10 +29,17 @@ python main.py
 
 ## Output
 
-- Console: Hiển thị chi tiết quá trình trao đổi phiếu, crash, phục hồi.
-- File log `site_0.log` đến `site_3.log`: Ghi đầy đủ sự kiện (SEND, RECEIVED, STATE, CRASH, RECOVERY_START...).
+- **Console**: Hien thi chi tiet qua trinh trao doi phieu, crash, phuc hoi.
+- **File log** trong `logs/`: `site_0.log` den `site_3.log`.
+  Cac su kien: SEND, RECEIVED, STATE, CRASH, RECOVERY_START, ...
 
-## Yêu cầu
+## Log Management
+
+- Moi site ghi log ra file rieng trong thu muc `logs/`.
+- Log duoc flush xuong dia ngay lap tuc de tranh mat du lieu khi crash.
+- Dinh dang: `[timestamp] Site <id> | EVENT | Chi tiet`
+
+## Yeu cau
 
 - Python 3.8+
-- Không cần thư viện ngoài.
+- Khong can thu vien ben ngoai.
