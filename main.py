@@ -22,7 +22,7 @@ MALICIOUS_SITE = 0
 CRASH_SITE = 2
 TIMEOUT = 5.0
 NET_MIN, NET_MAX = 0.1, 0.5
-LISTEN_AFTER = 15.0
+LISTEN_AFTER = TIMEOUT + 3
 LOG_DIR = 'logs'
 
 TX_ID = 1
@@ -107,15 +107,17 @@ def site_main(sid, qs, is_malicious, crash_after, shutdown):
     if is_recovery:
         log.info('RECOVERY_START',
                  'tx_id=%d | Phat hien READY. Vote cua toi: %s' % (tx_id, my_vote))
-        log.info('STATE', 'tx_id=%d -> %s (phuc hoi tu log)' % (tx_id, STATE_READY))
-        if my_vote:
-            votes[sid] = my_vote
-            log.info('RECEIVED', 'tx_id=%d | %s | from=self (tu log)' % (tx_id, my_vote))
-            log.info('REQUEST_VOTES', 'tx_id=%d | Gui yeu cau phieu den cac site con song...' % tx_id)
-            for t in range(NUM_SITES):
-                if t != sid:
-                    net_send(qs, sid, t, MSG_REQ, tx_id)
-                    log.info('SEND', 'tx_id=%d | REQUEST_VOTES | to=Site %d' % (tx_id, t))
+        log.info('STATE', 'tx_id=%d -> %s' % (tx_id, STATE_READY))
+        if not my_vote:
+            log.info('RECOVERY_FAIL', 'tx_id=%d | Khong the phuc hoi: khong co phieu trong log' % tx_id)
+            return
+        votes[sid] = my_vote
+        log.info('RECEIVED', 'tx_id=%d | %s | from=self (tu log)' % (tx_id, my_vote))
+        log.info('REQUEST_VOTES', 'tx_id=%d | Gui yeu cau phieu den cac site con song...' % tx_id)
+        for t in range(NUM_SITES):
+            if t != sid:
+                net_send(qs, sid, t, MSG_REQ, tx_id)
+                log.info('SEND', 'tx_id=%d | REQUEST_VOTES | to=Site %d' % (tx_id, t))
     else:
         log.info('STATE', 'tx_id=%d -> %s' % (tx_id, STATE_INIT))
         log.info('WAITING', 'tx_id=%d | Dang cho giao dich...' % tx_id)
@@ -187,16 +189,9 @@ def site_main(sid, qs, is_malicious, crash_after, shutdown):
     total = len(votes)
     log.info('DECISION_CALC', 'tx_id=%d | COMMIT=%d/%d ABORT=%d/%d' % (tx_id, cc, total, total - cc, total))
 
-    if total >= NUM_SITES and cc >= 3:
-        decision = VOTE_COMMIT
-    elif total >= NUM_SITES and cc < 3:
-        decision = VOTE_ABORT
-    elif cc >= 3:
-        decision = VOTE_COMMIT
-        log.info('TIMEOUT_DECISION', 'tx_id=%d | Timeout nhung %d >= 3 COMMIT' % (tx_id, cc))
-    else:
-        decision = VOTE_ABORT
-        log.info('TIMEOUT_DECISION', 'tx_id=%d | Timeout, thieu phieu' % tx_id)
+    if total < NUM_SITES:
+        log.info('TIMEOUT_DECISION', 'tx_id=%d | Timeout. Chi co %d/%d phieu' % (tx_id, total, NUM_SITES))
+    decision = VOTE_COMMIT if cc >= 3 else VOTE_ABORT
 
     log.info('STATE', 'tx_id=%d -> %s' % (tx_id, decision))
     log.info('FINAL_DECISION', 'tx_id=%d | %s' % (tx_id, decision))
@@ -226,10 +221,11 @@ def site_main(sid, qs, is_malicious, crash_after, shutdown):
 
 
 if __name__ == '__main__':
-    try:
-        multiprocessing.set_start_method('fork')
-    except RuntimeError:
-        pass
+    if sys.platform != 'win32':
+        try:
+            multiprocessing.set_start_method('fork')
+        except RuntimeError:
+            pass
 
     # Xoa log cu
     for i in range(NUM_SITES):
@@ -293,7 +289,7 @@ if __name__ == '__main__':
     print('[Main] Da khoi dong lai Site %d!' % CRASH_SITE, flush=True)
     print()
 
-    time.sleep(5)
+    time.sleep(TIMEOUT + 4)
 
     # Ket thuc
     print()
