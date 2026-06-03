@@ -3,23 +3,65 @@
 Mo phong co che dong thuan **Byzantine Fault Tolerance (BFT)** don gian hoa
 cho Distributed Ledger, su dung thu vien `multiprocessing` cua Python.
 
+## Tai sao BFT ma khong dung Paxos?
+
+| | Paxos | BFT (3f+1) |
+|--|-------|------------|
+| **Loi xu ly** | Crash fault (node dung hoat dong) | Byzantine fault (node noi doi) |
+| **Equivocation** | Khong chong duoc | Chong duoc |
+| **So node** | 2f+1 | 3f+1 |
+| **Quorum** | f+1 | 2f+1 |
+
+**Equivocation** la khi node doc hai gui phieu KHAC NHAU cho cac node
+khac nhau (vi du: COMMIT cho Site 0,2 nhung ABORT cho Site 1,3).
+Paxos gia dinh dieu nay khong xay ra. BFT duoc thiet ke de chong lai no.
+
 ## Kien truc
 
 - **4 nut (site)**, moi nut la mot tien trinh doc lap.
-- **Site 0**: Nut doc hai luon gui phieu ABORT.
-- **Site 1, 2, 3**: Nut trung thuc, gui phieu COMMIT.
-- **Quy tac 3f+1** (f=1): Can >= 3 phieu COMMIT de dat dong thuan.
+- **Site 0**: Byzantine — thuc hien **equivocation** (gui phieu mau thuan).
+- **Site 1, 3**: Trung thuc, luon gui phieu COMMIT.
+- **Site 2**: Trung thuc, crash sau TX 1, phuc hoi tu WAL.
+- **Quy tac 3f+1** (f=1): Can >= 3 phieu COMMIT (quorum = 2f+1) de dong thuan.
+
+## Cac thanh phan chinh
+
+### 1. Write-Ahead Log (WAL)
+- File JSON Lines trong thu muc `wal/`, thay vi parse text log.
+- Ghi trang thai (`INIT`, `READY`, `COMMIT`) va phieu bau.
+- Dung de phuc hoi sau crash — doc WAL thay vi parse log text.
+- Flush + fsync dam bao ghi xuong disk truoc khi crash.
+
+### 2. Ledger (So cai phan tan)
+- Moi site duy tri mot ledger rieng (danh sach TX da commit).
+- Sau khi dat dong thuan COMMIT, giao dich duoc ghi vao ledger.
+- Sau crash, ledger duoc khoi phuc tu WAL.
+
+### 3. Chu ky so (gia lap)
+- Moi message duoc "ky" bang sender ID.
+- Node nhan xac thuc chu ky truoc khi chap nhan.
+- Trong thuc te se dung RSA/ECDSA.
 
 ## Kich ban mo phong
 
-1. Tat ca 4 nut nhan giao dich va broadcast phieu bau.
-2. Site 2 broadcast COMMIT thanh cong, sau do crash ngay lap tuc.
-3. Site 0, 1, 3 thu thap du 4 phieu (3 COMMIT + 1 ABORT) -> COMMIT.
-4. Site 2 duoc khoi dong lai, doc log phat hien trang thai READY -> vao che do phuc hoi.
-5. Site 2 gui **REQUEST_VOTES** den cac nut con song.
-6. Site 0, 1, 3 gui lai phieu cua minh (**VOTE_RESPONSE**).
-7. Site 2 nhan du phieu, dem duoc 3 COMMIT -> COMMIT.
-8. Ket qua: Tat ca 3 nut trung thuc deu COMMIT.
+### Phase 1: TX 1 (equivocation + crash + recovery)
+
+1. Tat ca 4 site nhan giao dich TX 1.
+2. **Site 0** (Byzantine) thuc hien **equivocation**:
+   - Gui `COMMIT` cho Site 0, 2 (site chan)
+   - Gui `ABORT` cho Site 1, 3 (site le)
+3. **Site 2** broadcast `COMMIT` thanh cong, sau do **crash**.
+4. Site 0, 1, 3 thu thap phieu:
+   - Site 1 nhan: ABORT(0) + COMMIT(1) + COMMIT(2) + COMMIT(3) = 3 COMMIT
+   - 3 >= quorum(3) -> **COMMIT** (bat chap equivocation!)
+5. Site 2 duoc khoi dong lai, doc **WAL** -> READY -> vao che do phuc hoi.
+6. Site 2 gui `REQUEST_VOTES`, nhan lai phieu, dem 3 COMMIT -> **COMMIT**.
+
+### Phase 2: TX 2 (binh thuong, khong crash)
+
+7. Tat ca 4 site xu ly TX 2.
+8. Site 0 van equivocate, nhung 3 site trung thuc van dat **COMMIT**.
+9. **Ket qua**: Ledger cua 3 site trung thuc deu co 2 giao dich.
 
 ## Cach chay
 
@@ -29,15 +71,38 @@ python main.py
 
 ## Output
 
-- **Console**: Hien thi chi tiet qua trinh trao doi phieu, crash, phuc hoi.
+- **Console**: Chi tiet qua trinh equivocation, crash, phuc hoi.
 - **File log** trong `logs/`: `site_0.log` den `site_3.log`.
-  Cac su kien: SEND, RECEIVED, STATE, CRASH, RECOVERY_START, ...
+- **WAL** trong `wal/`: `site_0.wal` den `site_3.wal` (JSON Lines).
 
-## Log Management
+## Cau truc thu muc
 
-- Moi site ghi log ra file rieng trong thu muc `logs/`.
-- Log duoc flush xuong dia ngay lap tuc de tranh mat du lieu khi crash.
-- Dinh dang: `[timestamp] Site <id> | EVENT | Chi tiet`
+```
+csdlpt/
+├── main.py          # Code chinh
+├── README.md        # Tai lieu
+├── logs/            # Event log (text)
+│   ├── site_0.log
+│   ├── site_1.log
+│   ├── site_2.log
+│   └── site_3.log
+└── wal/             # Write-Ahead Log (JSON Lines)
+    ├── site_0.wal
+    ├── site_1.wal
+    ├── site_2.wal
+    └── site_3.wal
+```
+
+## Cong thuc BFT
+
+```
+f = 1                  # So node Byzantine toi da
+N = 3f + 1 = 4         # Tong so node can thiet
+Quorum = 2f + 1 = 3    # So phieu COMMIT can de dong thuan
+```
+
+Voi N=4 va f=1: du cho 1 node doc hai gui phieu mau thuan (equivocation),
+3 node trung thuc van co du quorum (3 phieu COMMIT) de dat dong thuan.
 
 ## Yeu cau
 
