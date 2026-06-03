@@ -79,19 +79,43 @@ python main.py
 
 ```
 csdlpt/
-├── main.py          # Code chinh
+├── config.py        # Hang so, tham so BFT, danh sach giao dich
+├── logger.py        # Ghi log su kien (console + file)
+├── wal.py           # Write-Ahead Log — crash recovery (JSON Lines)
+├── network.py       # Truyen thong + chu ky so gia lap
+├── consensus.py     # ★ State Machine BFT (trai tim giao thuc)
+├── main.py          # Orchestrator — dieu phoi mo phong
 ├── README.md        # Tai lieu
-├── logs/            # Event log (text)
+├── logs/            # Event log (text, auto-generated)
 │   ├── site_0.log
 │   ├── site_1.log
 │   ├── site_2.log
 │   └── site_3.log
-└── wal/             # Write-Ahead Log (JSON Lines)
+└── wal/             # Write-Ahead Log (JSON Lines, auto-generated)
     ├── site_0.wal
     ├── site_1.wal
     ├── site_2.wal
     └── site_3.wal
 ```
+
+### Kien truc module
+
+```
+config.py ──> logger.py ──> consensus.py ──> main.py
+    │                            ▲               │
+    └──> wal.py ─────────────────┘               │
+    │                            ▲               │
+    └──> network.py ─────────────┘               │
+                                                 │
+    main.py import consensus.site_main() <───────┘
+```
+
+- **config.py**: Dinh nghia F, N, QUORUM, state constants
+- **logger.py**: Ghi log co timestamp, flush xuong disk (fsync)
+- **wal.py**: Write-Ahead Log — dam bao durability, crash recovery
+- **network.py**: Truyen thong co chu ky so, do tre mang ngau nhien
+- **consensus.py**: Toan bo logic BFT: broadcast, collect, decide, recover
+- **main.py**: Chi dieu phoi process lifecycle, khong chua logic giao thuc
 
 ## Cong thuc BFT
 
