@@ -188,8 +188,47 @@ if __name__ == "__main__":
 
     # Cho Phase 2 hoan thanh
     time.sleep(TIMEOUT + LISTEN_AFTER + 3)
-    shutdown.set()
     for p in procs2:
+        p.join(timeout=3)
+        if p.is_alive():
+            p.terminate()
+            p.join(timeout=1)
+
+    # =============================================================
+    # PHASE 3: TX 3 — Tat ca trung thuc (khong equivocation, khong crash)
+    # =============================================================
+    #
+    # Muc dich: Chung minh BFT van hoat dong binh thuong khi KHONG co loi.
+    # Tat ca 4 site deu trung thuc -> dong thuan 100%.
+    # So sanh voi Phase 1 (co crash) va Phase 2 (co equivocation).
+    #
+    print()
+    print("=" * 60)
+    print("PHASE 3: TX 3 (tat ca trung thuc, khong co loi)")
+    print("-" * 60)
+    print()
+
+    # Tao queue moi cho Phase 3
+    shutdown.clear()
+    qs[:] = [mgr.Queue() for _ in range(NUM_SITES)]
+
+    tx3 = [TRANSACTIONS[2]]
+    procs3 = []
+    for sid in range(NUM_SITES):
+        # Tat ca site deu trung thuc (is_mal=False), khong crash
+        p = multiprocessing.Process(
+            target=site_main, args=(sid, qs, False, tx3, None, shutdown)
+        )
+        p.start()
+        procs3.append(p)
+        print("[Main] Khoi dong Site %d (Phase 3 — trung thuc)" % sid, flush=True)
+
+    print()
+
+    # Cho Phase 3 hoan thanh
+    time.sleep(TIMEOUT + LISTEN_AFTER + 3)
+    shutdown.set()
+    for p in procs3:
         p.join(timeout=3)
         if p.is_alive():
             p.terminate()
@@ -266,6 +305,7 @@ if __name__ == "__main__":
         print("  DONG THUAN cho tat ca %d giao dich, bat chap:" % len(TRANSACTIONS))
         print("    1. Site 0 thuc hien EQUIVOCATION (gui phieu mau thuan)")
         print("    2. Site 2 bi CRASH va phai PHUC HOI tu WAL")
+        print("    3. Tat ca site trung thuc (khong loi) -> dong thuan 100%%")
         print()
         print("  => CHUNG MINH: Can BFT (khong phai Paxos) vi Paxos")
         print("     KHONG chong duoc equivocation cua Byzantine node!")
@@ -277,3 +317,4 @@ if __name__ == "__main__":
     print("=" * 60)
 
     mgr.shutdown()
+

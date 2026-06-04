@@ -133,6 +133,7 @@ class BFTConfig:
         default_factory=lambda: [
             {"tx_id": 1, "data": "A chuyen 10 cho B"},
             {"tx_id": 2, "data": "B chuyen 5 cho C"},
+            {"tx_id": 3, "data": "C chuyen 3 cho D"},
         ]
     )
 
