@@ -1,0 +1,11 @@
+# BFT Distributed Ledger Dependencies
+
+# Cryptography (Ed25519 signing)
+cryptography>=41.0.0
+
+# RocksDB binding
+rocksdict>=0.3.0
+
+# (Optional) For HTTP client in Phase 5
+# flask>=3.0.0
+# requests>=2.31.0

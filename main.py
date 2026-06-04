@@ -1,24 +1,5 @@
 """
-Simplified BFT cho Distributed Ledger — Orchestrator
-
-Mo phong N nut (multiprocessing) voi co che dong thuan BFT (3f+1):
-- Site 0: Byzantine — equivocation (gui phieu KHAC NHAU cho cac site)
-- Site 1, 3: Trung thuc (luon COMMIT)
-- Site 2: Trung thuc, crash sau TX 1, phuc hoi bang WAL
-
-Tai sao can BFT ma khong dung Paxos?
-  Paxos chi xu ly crash fault (node ngung hoat dong).
-  BFT xu ly Byzantine fault (node gui thong tin MAU THUAN — equivocation).
-  Site 0 gui COMMIT cho mot so site, ABORT cho site khac.
-  => Paxos KHONG chong duoc hanh vi nay!
-
-Cau truc project:
-  config.py    — Hang so va tham so he thong
-  logger.py    — Ghi log su kien (console + file)
-  wal.py       — Write-Ahead Log (crash recovery)
-  network.py   — Truyen thong + chu ky so gia lap
-  consensus.py — ★ State Machine BFT (trai tim giao thuc)
-  main.py      — Orchestrator (file nay) — dieu phoi mo phong
+[PHASE 4] BFT Distributed Ledger — Orchestrator (PBFT)
 
 Chay: python main.py
 """
@@ -26,248 +7,122 @@ Chay: python main.py
 import os
 import sys
 import time
-import json
-import queue
-import multiprocessing
+import subprocess
 
 from config import (
     config,
     F, NUM_SITES, QUORUM,
     MALICIOUS_SITE, CRASH_SITE, CRASH_ON_TX,
-    TIMEOUT, LISTEN_AFTER,
-    TRANSACTIONS, VOTE_COMMIT,
+    TIMEOUT, LISTEN_AFTER, TRANSACTIONS,
+    VOTE_COMMIT, NODE_ADDRESSES, LOG_DIR,
 )
+
 from logger import Logger
-from wal import WAL
-from consensus import site_main
+from storage.rocksdb_store import KVStore, delete_db
 
 
-# ============================================================
-# MAIN — Dieu phoi mo phong 2 phase
-# ============================================================
-if __name__ == "__main__":
-    if sys.platform != "win32":
-        try:
-            multiprocessing.set_start_method("fork")
-        except RuntimeError:
-            pass
-
-    # Xoa log va WAL cu
+def main():
+    # Xoa log va RocksDB cu
     for i in range(NUM_SITES):
         Logger(i).clear()
-        WAL(i).clear()
-        state_file = f"wal/site_{i}_state.json"
-        if os.path.exists(state_file):
-            try:
-                os.remove(state_file)
-            except Exception:
-                pass
-
-
-    # Khoi tao queue + event
-    # [FIX 10] Dung list thay vi dict — giam overhead, truy cap nhanh hon
-    mgr = multiprocessing.Manager()
-    qs = [mgr.Queue() for _ in range(NUM_SITES)]
-    shutdown = mgr.Event()
+        delete_db(i)
 
     # ===== IN THONG TIN HE THONG =====
     print("=" * 60)
-    print("  SIMPLIFIED BFT CHO DISTRIBUTED LEDGER")
+    print("  BFT DISTRIBUTED LEDGER — PBFT + ROCKSDB + TCP + ED25519")
     print("=" * 60)
     print()
     print("  Thong so BFT:")
     print("    f = %d (so node Byzantine toi da)" % F)
     print("    N = 3f+1 = %d (tong so node)" % NUM_SITES)
-    print("    Quorum = 2f+1 = %d (so phieu COMMIT can thiet)" % QUORUM)
+    print("    Quorum = 2f+1 = %d (so phieu can cho PREPARE/COMMIT)" % QUORUM)
+    print()
+    print("  Giao thuc dong thuan: PBFT (3 pha: Pre-prepare, Prepare, Commit)")
+    print("  Leader chon theo view number: leader = view %% N")
+    print()
+    for sid, (host, port) in NODE_ADDRESSES.items():
+        print("    Site %d: %s:%d" % (sid, host, port))
     print()
     print("  Giao dich:")
     for tx in TRANSACTIONS:
         print("    TX %d: %s" % (tx["tx_id"], tx["data"]))
     print()
     print("  Cau hinh node:")
-    print("    Site 0: BYZANTINE (equivocation)")
-    print("            -> Gui COMMIT cho site 0,2; ABORT cho site 1,3")
+    print("    Site 0: BYZANTINE (equivocation) - (trong PBFT, equivocation bi phat hien)")
     print("    Site 1: Trung thuc")
     print("    Site 2: Trung thuc -> CRASH tai TX %d -> PHUC HOI" % CRASH_ON_TX)
     print("    Site 3: Trung thuc")
     print()
-    print("  Tai sao BFT ma khong dung Paxos?")
-    print("    Paxos chi xu ly crash fault (node dung hoat dong)")
-    print("    BFT xu ly Byzantine fault (node gui thong tin MAU THUAN)")
-    print("    => Site 0 se equivocate — Paxos KHONG chong duoc!")
-    if config.random_seed is not None:
-        print("  Random seed: %d (ket qua tai lap duoc)" % config.random_seed)
     print("=" * 60)
     print()
 
-    # =============================================================
-    # PHASE 1: TX 1 — Equivocation + Crash + Recovery
-    # =============================================================
-    print("PHASE 1: TX 1 (equivocation + crash + recovery)")
-    print("-" * 60)
+    # Khoi dong tat ca node
+    print("Khoi dong %d node PBFT..." % NUM_SITES)
     print()
 
-    tx1 = [TRANSACTIONS[0]]
     procs = []
+    log_files = []
     for sid in range(NUM_SITES):
-        is_mal = sid == MALICIOUS_SITE
-        crash = CRASH_ON_TX if sid == CRASH_SITE else None
-        p = multiprocessing.Process(
-            target=site_main, args=(sid, qs, is_mal, tx1, crash, shutdown)
+        log_f = open(os.path.join(LOG_DIR, "node_%d_stdout.log" % sid), "w")
+        log_files.append(log_f)
+        p = subprocess.Popen(
+            [sys.executable, "node.py", str(sid)],
+            stdout=log_f, stderr=subprocess.STDOUT,
+            universal_newlines=True, bufsize=1,
         )
-        p.start()
         procs.append(p)
-        print("[Main] Khoi dong Site %d" % sid, flush=True)
+        print("[Main] Khoi dong Node %d (PID %d) - Xem log tai logs/node_%d_stdout.log" % (sid, p.pid, sid), flush=True)
 
     print()
-    print("[Main] Cho Site %d broadcast va crash..." % CRASH_SITE)
+    print("[Main] Cho cac node xu ly PBFT...")
     print()
-    time.sleep(4)
+    time.sleep(22)
 
-    # Phat hien crash
-    if procs[CRASH_SITE].is_alive():
-        print("[Main] Terminate Site %d..." % CRASH_SITE, flush=True)
-        procs[CRASH_SITE].terminate()
-    else:
-        print("[Main] Site %d da crash!" % CRASH_SITE, flush=True)
-    procs[CRASH_SITE].join(timeout=2)
 
-    print("[Main] Sites 0, 1, 3 dang dong thuan TX 1...")
-    time.sleep(2)
-
-    # Phuc hoi Site 2
-    print()
-    print("-" * 60)
-    print("PHUC HOI: Khoi dong lai Site %d" % CRASH_SITE)
-    print("  Doc WAL -> READY -> REQUEST_VOTES -> thu thap phieu")
-    print("-" * 60)
+    print("[Main] Ket thuc...")
     print()
 
-    # [FIX 10] Drain queue cu de loai bo message cu truoc khi crash
-    # Khong thay the doi tuong Queue vi cac Site khac van giu tham chieu den Queue nay
-    old_q = qs[CRASH_SITE]
-    drain_count = 0
-    while not old_q.empty():
-        try:
-            old_q.get_nowait()
-            drain_count += 1
-        except queue.Empty:
-            break
-    if drain_count > 0:
-        print("[Main] Da drain %d tin nhan ton tu Site %d" % (drain_count, CRASH_SITE))
-
-    p_recover = multiprocessing.Process(
-        target=site_main, args=(CRASH_SITE, qs, False, tx1, None, shutdown)
-    )
-    p_recover.start()
-    procs[CRASH_SITE] = p_recover
-    print("[Main] Da khoi dong lai Site %d!" % CRASH_SITE, flush=True)
-    print()
-
-    # Cho tat ca hoan thanh Phase 1
-    time.sleep(TIMEOUT + LISTEN_AFTER + 3)
     for i, p in enumerate(procs):
-        p.join(timeout=3)
-        if p.is_alive():
+        if p.poll() is None:
             p.terminate()
-            p.join(timeout=1)
+            try:
+                p.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                p.kill()
+                p.wait()
 
-    # =============================================================
-    # PHASE 2: TX 2 — Binh thuong (van co equivocation, khong crash)
-    # =============================================================
+    for f in log_files:
+        try:
+            f.close()
+        except Exception:
+            pass
+
+
+    # In ket qua tu RocksDB
     print()
     print("=" * 60)
-    print("PHASE 2: TX 2 (binh thuong, khong crash)")
-    print("-" * 60)
-    print()
-
-    # Tao queue moi cho Phase 2
-    qs[:] = [mgr.Queue() for _ in range(NUM_SITES)]
-
-    tx2 = [TRANSACTIONS[1]]
-    procs2 = []
-    for sid in range(NUM_SITES):
-        is_mal = sid == MALICIOUS_SITE
-        p = multiprocessing.Process(
-            target=site_main, args=(sid, qs, is_mal, tx2, None, shutdown)
-        )
-        p.start()
-        procs2.append(p)
-        print("[Main] Khoi dong Site %d (Phase 2)" % sid, flush=True)
-
-    print()
-
-    # Cho Phase 2 hoan thanh
-    time.sleep(TIMEOUT + LISTEN_AFTER + 3)
-    for p in procs2:
-        p.join(timeout=3)
-        if p.is_alive():
-            p.terminate()
-            p.join(timeout=1)
-
-    # =============================================================
-    # PHASE 3: TX 3 — Tat ca trung thuc (khong equivocation, khong crash)
-    # =============================================================
-    #
-    # Muc dich: Chung minh BFT van hoat dong binh thuong khi KHONG co loi.
-    # Tat ca 4 site deu trung thuc -> dong thuan 100%.
-    # So sanh voi Phase 1 (co crash) va Phase 2 (co equivocation).
-    #
-    print()
-    print("=" * 60)
-    print("PHASE 3: TX 3 (tat ca trung thuc, khong co loi)")
-    print("-" * 60)
-    print()
-
-    # Tao queue moi cho Phase 3
-    shutdown.clear()
-    qs[:] = [mgr.Queue() for _ in range(NUM_SITES)]
-
-    tx3 = [TRANSACTIONS[2]]
-    procs3 = []
-    for sid in range(NUM_SITES):
-        # Tat ca site deu trung thuc (is_mal=False), khong crash
-        p = multiprocessing.Process(
-            target=site_main, args=(sid, qs, False, tx3, None, shutdown)
-        )
-        p.start()
-        procs3.append(p)
-        print("[Main] Khoi dong Site %d (Phase 3 — trung thuc)" % sid, flush=True)
-
-    print()
-
-    # Cho Phase 3 hoan thanh
-    time.sleep(TIMEOUT + LISTEN_AFTER + 3)
-    shutdown.set()
-    for p in procs3:
-        p.join(timeout=3)
-        if p.is_alive():
-            p.terminate()
-            p.join(timeout=1)
-
-    # =============================================================
-    # KET QUA CUOI CUNG
-    # =============================================================
-    print()
-    print("=" * 60)
-    print("  KET QUA CUOI CUNG")
+    print("  KET QUA PBFT")
     print("=" * 60)
     print()
 
     labels = {0: "BYZANTINE", 1: "Trung thuc", 2: "CRASH->PHUC HOI", 3: "Trung thuc"}
 
     for i in range(NUM_SITES):
-        w = WAL(i)
-        ledger = w.rebuild_ledger(TRANSACTIONS)
-        print("  Site %d (%s):" % (i, labels[i]))
-        for tx in TRANSACTIONS:
-            st, vt = w.read_last_state(tx["tx_id"])
-            icon = "\u2713" if st == VOTE_COMMIT else ("\u2717" if st else "\u2014")
-            print(
-                "    %s TX %d: state=%-8s vote=%-8s | %s"
-                % (icon, tx["tx_id"], st or "?", vt or "?", tx["data"])
-            )
-        print("    Ledger: %d giao dich" % len(ledger))
+        try:
+            store = KVStore(i)
+            ledger = store.get_ledger()
+            print("  Node %d (%s):" % (i, labels[i]))
+            for tx in TRANSACTIONS:
+                st, vt = store.read_last_wal_state(tx["tx_id"])
+                icon = "✓" if st == VOTE_COMMIT else ("✗" if st else "—")
+                print(
+                    "    %s TX %d: state=%-8s vote=%-8s | %s"
+                    % (icon, tx["tx_id"], st or "?", vt or "?", tx["data"])
+                )
+            print("    Ledger: %d giao dich" % len(ledger))
+            store.close()
+        except Exception as e:
+            print("  Node %d: Loi khi doc RocksDB: %s" % (i, e))
         print()
 
     # Kiem tra dong thuan
@@ -278,25 +133,29 @@ if __name__ == "__main__":
         for i in range(NUM_SITES):
             if i == MALICIOUS_SITE:
                 continue
-            w = WAL(i)
-            st, _ = w.read_last_state(tx["tx_id"])
-            honest_states.append(st)
+            try:
+                store = KVStore(i)
+                st, _ = store.read_last_wal_state(tx["tx_id"])
+                honest_states.append(st)
+                store.close()
+            except Exception:
+                honest_states.append(None)
 
         if all(s == VOTE_COMMIT for s in honest_states):
             print(
-                "  \u2713 TX %d: DONG THUAN — 3 site trung thuc deu COMMIT"
+                "  ✓ TX %d: DONG THUAN — 3 site trung thuc deu COMMIT"
                 % tx["tx_id"]
             )
         elif all(s is not None for s in honest_states):
             consistent = len(set(honest_states)) == 1
             if consistent:
                 print(
-                    "  \u2713 TX %d: DONG THUAN — 3 site trung thuc deu %s"
+                    "  ✓ TX %d: DONG THUAN — 3 site trung thuc deu %s"
                     % (tx["tx_id"], honest_states[0])
                 )
             else:
                 print(
-                    "  \u2717 TX %d: MAT DONG THUAN! States: %s"
+                    "  ✗ TX %d: MAT DONG THUAN! States: %s"
                     % (tx["tx_id"], honest_states)
                 )
                 all_ok = False
@@ -308,24 +167,12 @@ if __name__ == "__main__":
 
     print()
     if all_ok:
-        print("  KET LUAN:")
-        print(
-            "  He thong BFT (N=3f+1=%d, quorum=2f+1=%d) da dam bao"
-            % (NUM_SITES, QUORUM)
-        )
-        print("  DONG THUAN cho tat ca %d giao dich, bat chap:" % len(TRANSACTIONS))
-        print("    1. Site 0 thuc hien EQUIVOCATION (gui phieu mau thuan)")
-        print("    2. Site 2 bi CRASH va phai PHUC HOI tu WAL")
-        print("    3. Tat ca site trung thuc (khong loi) -> dong thuan 100%%")
-        print()
-        print("  => CHUNG MINH: Can BFT (khong phai Paxos) vi Paxos")
-        print("     KHONG chong duoc equivocation cua Byzantine node!")
+        print("  KET LUAN: He thong PBFT da hoat dong!")
     else:
-        print("  CANH BAO: Co loi trong qua trinh dong thuan!")
+        print("  CANH BAO: Co loi trong qua trinh PBFT!")
 
-    print()
-    print("  Chi tiet: xem logs/ (event log) va wal/ (write-ahead log)")
     print("=" * 60)
 
-    mgr.shutdown()
 
+if __name__ == "__main__":
+    main()

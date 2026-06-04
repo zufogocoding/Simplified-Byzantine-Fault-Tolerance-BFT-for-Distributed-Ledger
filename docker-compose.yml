@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  node0:
+    build: .
+    container_name: bft-node0
+    command: ["0"]
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./logs:/app/logs
+      - ./rocksdb:/app/rocksdb
+    networks:
+      - bft-net
+
+  node1:
+    build: .
+    container_name: bft-node1
+    command: ["1"]
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./logs:/app/logs
+      - ./rocksdb:/app/rocksdb
+    networks:
+      - bft-net
+
+  node2:
+    build: .
+    container_name: bft-node2
+    command: ["2"]
+    ports:
+      - "5002:5002"
+    volumes:
+      - ./logs:/app/logs
+      - ./rocksdb:/app/rocksdb
+    networks:
+      - bft-net
+
+  node3:
+    build: .
+    container_name: bft-node3
+    command: ["3"]
+    ports:
+      - "5003:5003"
+    volumes:
+      - ./logs:/app/logs
+      - ./rocksdb:/app/rocksdb
+    networks:
+      - bft-net
+
+networks:
+  bft-net:
+    driver: bridge
