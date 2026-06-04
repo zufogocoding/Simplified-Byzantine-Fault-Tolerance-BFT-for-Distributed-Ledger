@@ -1,68 +1,51 @@
-# 🏛️ QUYẾT ĐỊNH KIẾN TRÚC: CONSENSUS LAYER VS STORAGE ENGINE (BFT & POSTGRESQL)
+# 🏛️ ARCHITECTURAL DECISIONS: PBFT + ROCKSDB + TCP + ED25519 SYSTEM
 
-Tài liệu này ghi lại phân tích kiến trúc, các đánh giá kỹ thuật và hướng tiếp cận thực tế khi xây dựng một hệ thống Cơ sở dữ liệu phân tán có khả năng chống lỗi Byzantine (Byzantine Fault Tolerance - BFT).
-
----
-
-## 1. Bản chất kỹ thuật: Tại sao không thể "chỉ dùng" PostgreSQL?
-
-Trong môi trường thực tế, khi xây dựng các cơ sở dữ liệu phân tán thế hệ mới (như CockroachDB, Google Spanner, YugabyteDB) hoặc các nền tảng Blockchain/Distributed Ledger (như Ethereum, Hyperledger Fabric):
-* **PostgreSQL** là một **Storage Engine** cực kỳ xuất sắc. Nó cung cấp ACID ở mức single-node, quản lý transaction bằng WAL (Write-Ahead Log), thực hiện phân chỉ mục bằng B-Tree và dọn dẹp dữ liệu bằng cơ chế Checkpointing.
-* Tuy nhiên, hệ sinh thái nhân bản (Replication) có sẵn của PostgreSQL chỉ hỗ trợ mô hình lỗi **CFT (Crash Fault Tolerance)**. Tức là các node trung thực tuyệt đối và chỉ có thể chết (crash) chứ không thể gửi dữ liệu sai lệch (nói dối/equivocate).
-
-### Kịch bản lỗi Byzantine (Equivocation) trên Postgres:
-Nếu một Node Master Postgres bị chiếm quyền kiểm soát (Byzantine Node):
-1. Master gửi bản ghi WAL của giao dịch $TX_A$ tới Node Standby 1.
-2. Cùng lúc đó, Master gửi bản ghi WAL của giao dịch $TX_B$ (mâu thuẫn với $TX_A$) tới Node Standby 2.
-3. Bản thân Postgres không có giao thức đồng thuận nhiều bên (Multi-party Consensus) để phát hiện sự mâu thuẫn này. Hệ thống sẽ ngay lập tức bị phân rã trạng thái (split-brain) và mất tính nhất quán dữ liệu.
-
-> 💡 **Kết luận kiến trúc:** Để đưa PostgreSQL vào một hệ phân tán BFT, ta **vẫn bắt buộc phải viết một lớp BFT Consensus (như Python core logic của dự án này) nằm phía trước Postgres**. Lớp này đóng vai trò quyết định thứ tự giao dịch đồng nhất trên toàn mạng, sau đó mới ra lệnh cho Postgres cục bộ thực hiện ghi đĩa.
+Tài liệu này ghi lại các quyết định kiến trúc cốt lõi, so sánh công nghệ và giải pháp kỹ thuật thực tế được áp dụng trong quá trình nâng cấp hệ thống **BFT Distributed Ledger** từ mô phỏng IPC cục bộ lên hệ thống phân tán thực thụ chạy trên mạng TCP thực.
 
 ---
 
-## 2. So sánh Kiến trúc Thực tế vs. Mô phỏng Học thuật
+## 1. Bản chất kỹ thuật: Tại sao BFT Consensus + RocksDB tối ưu hơn PostgreSQL?
 
-| Tiêu chí | Mô phỏng Hiện tại (SQLite/Custom File State) | Hệ thống Sản xuất (Production BFT-backed Postgres) |
-|---|---|---|
-| **Consensus Layer** | Python Multiprocessing BFT (3f+1) | Tendermint Core / PBFT engine viết bằng Go/Rust |
-| **Storage Engine** | File State JSON có cấu trúc + Checkpoint | **PostgreSQL** hoặc RocksDB/LevelDB gắn tại mỗi node |
-| **Giao tiếp giữa các Node** | IPC Queue (Shared Memory) | gRPC / TCP sockets mã hóa SSL/TLS |
-| **Tính di động (Portability)** | **Cực kỳ cao** (Chỉ cần chạy lệnh `python main.py`, không cần cấu hình môi trường) | **Thấp** (Yêu cầu cài đặt hạ tầng mạng, cấu hình Docker/Kubernetes cho từng Postgres instance) |
-| **Mục đích thiết kế** | Tối ưu học tập, làm nổi bật logic đồng thuận bên trong (White-box) | Tối ưu hiệu năng đọc/ghi thực tế, bảo mật dữ liệu sản xuất (Black-box) |
+Trong các đề tài Cơ sở dữ liệu phân tán (CSDLPT) truyền thống, sinh viên thường cấu hình nhân bản (Replication) trên các hệ quản trị CSDL như MySQL hay PostgreSQL. Tuy nhiên, hướng tiếp cận đó gặp các giới hạn nghiêm trọng về mặt lý thuyết và thực tiễn:
 
----
+* **Giới hạn CFT của PostgreSQL**: Các cơ chế nhân bản sẵn có của PostgreSQL (Streaming Replication, Logical Replication) chỉ hỗ trợ mô hình lỗi **CFT (Crash Fault Tolerance)**. Chúng giả định tất cả các node trong mạng là trung thực và chỉ có thể bị chết (crash) chứ không thể gửi dữ liệu sai lệch (Byzantine).
+* **Equivocation trên Postgres**: Nếu Node Master bị hack (Byzantine Node), nó có thể gửi hai bản ghi WAL mâu thuẫn nhau cho hai Node Standby khác nhau. Không có cơ chế đồng thuận đa bên (Multi-party Consensus) nào trong Postgres để phát hiện sự mâu thuẫn này, dẫn đến trạng thái phân rã (split-brain) ngay lập tức.
+* **Lợi thế của RocksDB (LSM-Tree Storage)**: RocksDB được chọn làm công cụ lưu trữ cục bộ cho từng Node thay vì PostgreSQL vì:
+  1. **Hiệu năng ghi tuần tự**: Cấu trúc LSM-Tree (Log-Structured Merge-tree) của RocksDB tối ưu hóa tốc độ ghi WAL (Write-Ahead Log) và PBFT logs cực nhanh.
+  2. **Kiểm soát chi tiết**: Giúp lập trình viên can thiệp sâu vào tầng logic lưu trữ (lưu checkpoint, replay WAL và cắt tỉa log) độc lập với tầng đồng thuận.
 
-## 3. Đề xuất Kiến trúc Scale-Up chuẩn Doanh nghiệp (Enterprise Scale-Up)
-
-Nếu nâng cấp dự án này lên một cơ sở dữ liệu phân tán BFT chạy trong môi trường thực tế, kiến trúc sẽ được thiết kế như sau:
-
-```
-[ Client Applications ]
-        │
-        ▼ (Gửi SQL Query / Transactions)
-┌─────────────────────────────────────────────────────────┐
-│              1. TẦNG ĐỒNG THUẬN (BFT CONSENSUS)         │
-│  - Nhận transaction từ Client.                          │
-│  - Sử dụng giao thức BFT để thống nhất thứ tự TX.       │
-│  - Xác thực chữ ký số thực tế (ECDSA/Secp256k1).        │
-└──────────────────────────┬──────────────────────────────┘
-                           │
-                           ▼ (Đẩy chuỗi giao dịch đã sắp xếp thứ tự)
-┌─────────────────────────────────────────────────────────┐
-│            2. TẦNG LƯU TRỮ CỤC BỘ (LOCAL STORAGE)       │
-│  - Mỗi Node chạy độc lập một instance **PostgreSQL**.   │
-│  - Thực thi các câu lệnh SQL đã được Consensus thông qua.│
-│  - Lưu World State hiện tại, quản lý Index và Transaction.│
-└─────────────────────────────────────────────────────────┘
-```
-
-### Tại sao kiến trúc này tối ưu cho 1 triệu transaction?
-* **PostgreSQL** giải quyết hoàn toàn bài toán truy vấn phức tạp $O(1)$ thông qua chỉ mục (Index) và tối ưu hóa câu lệnh (Query Planner).
-* **BFT Consensus** chỉ cần quan tâm đến việc đồng nhất thứ tự các transaction đầu vào, giải phóng nó khỏi việc quản lý dữ liệu trạng thái chi tiết.
-* **Checkpointing** của Postgres (thông qua `bgwriter` và `checkpoint` processes) tự động đồng bộ dirty pages xuống đĩa và cắt ngắn WAL định kỳ, ngăn ngừa việc phình to dung lượng và giảm thời gian recovery xuống mức mili-giây.
+> 💡 **Kết luận kiến trúc**: Việc sử dụng **Custom PBFT Consensus Layer + RocksDB Local Engine** cung cấp khả năng chịu lỗi Byzantine thực sự ($3f+1$) mà các hệ thống PostgreSQL truyền thống không thể tự đạt được mà không có một tầng đồng thuận bao bọc phía trước.
 
 ---
 
-## 4. Tổng kết Quyết định Thiết kế của Đồ án
-* Giữ nguyên lớp đồng thuận tự viết bằng Python và cấu trúc World State DB/Checkpointing gọn nhẹ bằng file cục bộ nhằm mục đích **đảm bảo tính di động tối đa**, giúp đồ án dễ dàng kiểm thử và chấm điểm trên mọi môi trường.
-* Đồng thời, cung cấp tài liệu kiến trúc này để chứng minh sinh viên hiểu rõ cấu trúc hạ tầng thực tế và có khả năng định hướng nâng cấp hệ thống sử dụng PostgreSQL khi chuyển dịch sang môi trường sản xuất quy mô lớn.
+## 2. Các Quyết định Thiết kế Kiến trúc Thực tế đã triển khai
+
+### 2.1. Giao tiếp mạng qua TCP Connection Pool (`network/connection_pool.py`)
+* **Quyết định**: Thay vì mở và đóng socket TCP cho mỗi tin nhắn truyền đi (gây overhead lớn và dễ cạn kiệt file descriptors khi tải cao), chúng tôi triển khai một TCP Connection Pool duy trì kết nối dài hạn.
+* **Cơ chế**: Khi Node khởi chạy, nó song song hóa các luồng ngầm để kết nối đến các Node khác. Socket được giữ mở liên tục. Nếu một kết nối bị lỗi hoặc mất gói mạng, pool sẽ tự động đóng socket cũ, thiết lập socket mới và gửi lại tin nhắn một cách trong suốt.
+
+### 2.2. Hỗ trợ Socket Server dài hạn (Persistent Server)
+* **Quyết định**: Nâng cấp TCPServer để đọc liên tục từ các socket của connection pool bằng cơ chế tách dòng băm nhỏ (`\n` delimiter).
+* **Cơ chế**: Sử dụng một buffer đệm ngầm để tích lũy dữ liệu thô từ socket, phân tách các chuỗi JSON thông qua `buffer.partition(b"\n")`. Điều này giúp xử lý được nhiều tin nhắn dồn dập trên cùng một đường truyền TCP.
+
+### 2.3. Khóa ghi đệ quy Thread-Safe (`threading.RLock`)
+* **Quyết định**: Đổi toàn bộ các khóa đồng bộ trong PBFT Engine và View Change Manager từ `threading.Lock` thành `threading.RLock` (Reentrant Lock).
+* **Lý do**: PBFT là giao thức đa pha đồng thời. Trong quá trình kiểm tra Quorum phiếu Prepare, luồng xử lý chính cần gọi tiếp hàm gửi Commit và tự cập nhật trạng thái của mình. Sử dụng `Lock` thông thường sẽ gây ra lỗi **Self-Deadlock** (tự khóa chính mình vĩnh viễn trên cùng một thread). `RLock` cho phép acquire khóa nhiều lần trên cùng một thread an toàn.
+
+### 2.4. Cơ chế Checkpoint trạng thái & Cắt tỉa RocksDB WAL
+* **Quyết định**: Thực hiện lưu checkpoint trạng thái số dư (balances) định kỳ mỗi $K=2$ giao dịch.
+* **Lý do**: Nếu chỉ lưu trữ WAL tuần tự mãi mãi, dung lượng đĩa sẽ phình to nhanh chóng và thời gian replay WAL khi khôi phục sau crash sẽ tăng tuyến tính. Khi $2f+1$ node đạt đồng thuận về cùng một State Checkpoint, checkpoint đó được đánh dấu là *Stable Checkpoint*. RocksDB sẽ thực hiện cắt tỉa (prune) các bản ghi WAL và PBFT logs cũ nằm dưới Sequence Number của checkpoint này để giải phóng hoàn toàn bộ nhớ.
+
+---
+
+## 3. Bản so sánh Công nghệ: Trước và Sau khi nâng cấp
+
+| Tiêu chí | Mô phỏng Cũ (Legacy) | Hệ thống Thực tế Mới (Upgraded) |
+| :--- | :--- | :--- |
+| **Giao tiếp mạng** | `multiprocessing.Queue` (Shared Memory) | TCP Sockets thật với **TCP Connection Pool** |
+| **Mật mã & Xác thực** | Chuỗi giả lập (`"SIG_SITE_X"`) | Chữ ký số **Ed25519** thật (SHA-256 Digest) |
+| **Công cụ lưu trữ** | File log JSON Line tuần tự | **RocksDB** (Log, State, Checkpoint, Ledger) |
+| **Giao thức đồng thuận** | Bỏ phiếu 1 pha (CFT-like) | **PBFT 3 pha** + **View Change** + **New View** |
+| **Heartbeat & Phát hiện lỗi** | Không có (Giả lập delay ngẫu nhiên) | Luồng **Heartbeat PING/PONG** ngầm phát hiện leader lỗi |
+| **Tách biệt vai trò Client** | Khởi chạy giao dịch cứng từ main process | Chương trình **Client độc lập (`client.py`)** ký gửi qua mạng |
+| **Đóng gói & Chạy thử** | Chạy Script cục bộ đơn giản | **Docker Compose**, **Makefile** và **Integration Tests** tự động |
