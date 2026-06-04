@@ -1,160 +1,199 @@
-# 📝 KẾ HOẠCH TRIỂN KHAI HỆ THỐNG BFT DISTRIBUTED LEDGER THỰC TẾ
-*(Tài liệu đặc tả kỹ thuật dành cho AI Coding Agents)*
+# 📋 KẾ HOẠCH TRIỂN KHAI HỆ THỐNG BFT DISTRIBUTED LEDGER THỰC TẾ (CẬP NHẬT)
+
+> **Mục tiêu:** Biến mô phỏng BFT đơn giản thành hệ phân tán chịu lỗi Byzantine (PBFT) chạy trên TCP thực, với Ed25519, RocksDB, Docker, client độc lập và kiểm thử tự động.
 
 ---
 
-## 🎯 MỤC TIÊU TỔNG QUÁT
-
-Từ mã nguồn mô phỏng đơn giản (dùng `multiprocessing.Queue`, chữ ký giả lập, WAL file JSON, giao thức broadcast-thu thập), phát triển thành một **hệ thống phân tán thực tế** chạy trên môi trường đa container với các yêu cầu kỹ thuật:
-- Giao tiếp qua mạng TCP thật, hỗ trợ container hóa.
-- Xác thực bằng chữ ký số mạnh Ed25519.
-- Lưu trữ dữ liệu hiệu năng cao với RocksDB.
-- Giao thức đồng thuận **PBFT** (Practical Byzantine Fault Tolerance) đầy đủ.
-- Client tách biệt gửi giao dịch tới mạng lưới.
-- Kiểm thử tích hợp toàn diện và đóng gói hoàn thiện.
-
----
-
-## 📁 CẤU TRÚC THƯ MỤC DỰ KIẾN SAU KHI HOÀN THÀNH
+## 📁 Cấu trúc thư mục đích
 
 ```
 bft-ledger/
-├── config.py
-├── crypto_utils.py          # Sinh khóa, ký, xác minh (Ed25519)
+├── config.py                 # Cấu hình tập trung (node, crypto, mạng)
+├── crypto_utils.py           # Ed25519 (key, sign, verify, digest)
 ├── network/
-│   ├── tcp_server.py        # Listener đa luồng
-│   └── tcp_client.py        # Sender helper
+│   ├── tcp_server.py         # TCP server với connection pool
+│   └── tcp_client.py         # Gửi tin nhắn qua pool
 ├── storage/
-│   ├── rocksdb_store.py      # Thay thế wal.py và storage.py cũ
-│   └── world_state.py        # Quản lý trạng thái số dư tài khoản
+│   ├── rocksdb_store.py      # RocksDB với WAL, state, ledger
+│   └── world_state.py        # Quản lý số dư, replay logic
 ├── consensus/
-│   ├── pbft.py               # Giao thức PBFT (Pre-prepare, Prepare, Commit)
-│   └── view_change.py        # Giao thức View Change phục hồi lỗi Leader
-├── node.py                   # Entrypoint khởi chạy của một node
-├── client.py                 # Client gửi giao dịch
-├── main.py                   # Orchestrator (Khởi động và điều phối kiểm tra)
-├── docker-compose.yml        # Định nghĩa cụm mạng phân tán
+│   ├── pbft.py               # PBFT (Pre‑prepare, Prepare, Commit, Checkpoint, View‑change)
+│   └── view_change.py        # View‑change với bằng chứng
+├── node.py                   # Entry point (vòng lặp xử lý sự kiện)
+├── client.py                 # Gửi giao dịch, nhận reply
+├── main.py                   # Orchestrator (khởi tạo cluster, chạy demo)
+├── docker-compose.yml        # 4 node + network (có thể thêm client)
 ├── tests/
-│   ├── test_crypto.py
+│   ├── test_crypto.py        # Unit tests
 │   ├── test_network.py
 │   ├── test_pbft.py
-│   └── integration_test.py
+│   └── integration_test.py   # End‑to‑end với Docker
+├── run_demo.sh               # Tự động hóa toàn bộ
 └── requirements.txt
 ```
 
 ---
 
-## 🛠️ CHI TIẾT CÁC BƯỚC THỰC HIỆN THEO GIAI ĐOẠN (PHASES)
+## 🧩 CÁC GIAI ĐOẠN THỰC HIỆN
 
-### 🛜 PHASE 1 – Mạng truyền thông thực tế (TCP Network)
+### PHASE 0 – Chuẩn bị hạ tầng và các lớp cơ bản
 
-**Mục tiêu:** Thay thế `multiprocessing.Queue` bằng giao thức socket TCP thực tế. Mỗi node chạy độc lập dưới dạng một process riêng và giao tiếp qua cổng TCP mạng.
+**Mục tiêu:** Đảm bảo các module nền tảng hoạt động độc lập và có thể kiểm thử.
 
-**Các bước thực hiện:**
-1. Xóa file `network.py` cũ, tạo thư mục `network/` chứa hai module:
-   - `tcp_server.py`: Định nghĩa class `TCPServer` chạy trên một thread riêng biệt, lắng nghe trên cổng được chỉ định, nhận các thông điệp JSON, giải mã và đẩy vào một hàng đợi nội bộ (`queue.Queue`).
-   - `tcp_client.py`: Định nghĩa hàm helper `send_message(host, port, message)` phục vụ gửi JSON qua TCP socket.
-2. Cập nhật `config.py`:
-   - Thêm cấu hình địa chỉ mạng tĩnh cho các node: `NODE_ADDRESSES = {0: ('localhost', 5000), 1: ('localhost', 5001), 2: ('localhost', 5002), 3: ('localhost', 5003)}`.
-3. Cập nhật `node.py` (chuyển đổi từ `consensus.py` cũ):
-   - Khởi động `TCPServer` trong một thread riêng ngay khi node khởi chạy để đón nhận message.
-   - Thay thế toàn bộ các lời gọi `qs[t].put(msg)` cũ bằng hàm `send_message()` tới IP/Port tương ứng của node đích.
-   - Sử dụng hàng đợi nội bộ (`queue.Queue`) của Server để thay thế cho `qs[sid]`.
-4. **Giữ nguyên định dạng các message** (`VOTE`, `REQ`, `RESP`, `DEC`) và logic thu thập phiếu trong `collect_votes` và `listen_for_recovery` để đảm bảo hệ thống không bị xáo trộn thuật toán ở giai đoạn này.
-5. Thêm cơ chế xử lý lỗi kết nối, tự động reconnect và xử lý timeout.
-6. **Kiểm thử đơn vị:** Khởi chạy độc lập 4 node trên 4 cổng khác nhau của localhost, gửi 1 giao dịch và kiểm tra việc truyền nhận thành công.
+1. **Crypto (`crypto_utils.py`)** đã có, cần bổ sung:
+   - Hàm `compute_digest(request_data: bytes) -> str` (SHA‑256 hex).
+   - Hàm `hash_message(msg_dict) -> str` để tính digest của message (dùng khi cần đối chiếu).
 
----
+2. **RocksDB (`storage/rocksdb_store.py`)** hiện có, cần bổ sung:
+   - Hàng đợi ghi (thread‑safe) – dùng `threading.Lock` cho mọi thao tác ghi.
+   - Lưu checkpoint state: key `state::checkpoint` chứa JSON `{seq: n, balances: {...}}`.
+   - Hàm `save_checkpoint(seq, balances_dict)` và `load_checkpoint() -> (seq, balances)`.
+   - Hàm `replay_wal_from(seq)` để áp dụng các giao dịch đã commit sau checkpoint.
+   - Hàm `delete_old_wal(below_seq)` để giải phóng không gian.
 
-### 🔑 PHASE 2 – Chữ ký số mã hóa thực tế (Ed25519)
-
-**Mục tiêu:** Tích hợp cặp khóa Public/Private Key thực tế cho từng node để ký và xác thực thông điệp gửi đi.
-
-**Các bước thực hiện:**
-1. Tạo module `crypto_utils.py`:
-   - Sử dụng thư viện `cryptography` (Ed25519) để viết hàm `generate_keypair()` sinh cặp khóa dạng bytes.
-   - Viết hàm `sign(private_key, message_bytes)` sinh chữ ký số.
-   - Viết hàm `verify(public_key, message_bytes, signature)` trả về kết quả xác thực.
-   - Viết hàm `pack_message(msg_dict)` serialize thông điệp thành bytes (sử dụng `json.dumps(sort_keys=True)` để đảm bảo tính nhất quán của chuỗi bytes trước khi ký).
-2. Cập nhật `config.py`:
-   - Lưu trữ danh sách khóa công khai tĩnh: `PUBLIC_KEYS = {0: key0_bytes, 1: key1_bytes, ...}` phục vụ việc xác thực chéo giữa các node (PKI mô phỏng).
-3. Cập nhật toàn bộ các điểm gọi `sign_message` và `verify_signature`:
-   - Trực tiếp ký lên chuỗi bytes của message dict và đính kèm signature (dạng hex string) vào message.
-   - Khi nhận message, node nhận sẽ tra cứu Public Key của sender ID tương ứng từ `PUBLIC_KEYS` trong config và thực hiện xác minh chữ ký thực tế.
-   - Nếu xác minh thất bại, lập tức loại bỏ thông điệp để chống giả mạo thông tin.
-4. **Kiểm thử:** Viết script test `tests/test_crypto.py` kiểm chứng việc ký/xác minh, giả lập sửa đổi nội dung message để đảm bảo việc xác thực thất bại đúng như kỳ vọng.
+3. **Mạng TCP** hiện có nhưng cần nâng cấp:
+   - Thay vì mở socket mới mỗi lần gửi, triển khai `TCPConnectionPool` (mở socket đến mỗi node một lần, giữ liên tục, tự động reconnect khi mất).
+   - `tcp_server.py` xử lý message đọc đến hết dòng (`\n`) và giữ kết nối mở (đã làm khá tốt).
+   - Thêm heartbeat: mỗi node định kỳ gửi `PING`, nếu không nhận `PONG` trong timeout → coi node đó đã chết (phục vụ view‑change nhanh hơn).
 
 ---
 
-### 📦 PHASE 3 – Lưu trữ dữ liệu với RocksDB
+### PHASE 1 – Hoàn thiện giao thức PBFT
 
-**Mục tiêu:** Thay thế file WAL định dạng JSON Lines và file checkpoint thô sơ bằng RocksDB hiệu năng cao.
+**Mục tiêu:** Triển khai đầy đủ PBFT với digest, checkpoint và view‑change an toàn.
 
-**Các bước thực hiện:**
-1. Khai báo thư viện `python-rocksdb` (hoặc `pyrocksdb`) trong `requirements.txt`.
-2. Tạo module `storage/rocksdb_store.py`:
-   - Định nghĩa lớp `KVStore` quản lý kết nối cơ sở dữ liệu:
-     - Khởi tạo mở cơ sở dữ liệu RocksDB cục bộ cho mỗi node, chia thành các Column Family độc lập: `cf_wal` (lưu log đồng thuận), `cf_state` (lưu số dư tài khoản hiện tại), `cf_ledger` (lưu chuỗi giao dịch đã commit).
-     - Định nghĩa hàm `put_wal(tx_id, state, vote, timestamp)` để ghi log đồng thuận. Key có dạng `tx_id:sequence`.
-     - Định nghĩa hàm `read_last_state(tx_id)` để lấy trạng thái đồng thuận gần nhất từ `cf_wal`.
-     - Định nghĩa hàm `put_state(account, balance)` và `get_balance(account)` để quản lý tài khoản.
-     - Định nghĩa các hàm quản lý ghi/đọc chuỗi giao dịch trên `cf_ledger`.
-3. Sửa đổi `node.py`:
-   - Thay thế hoàn toàn import `WAL` và `WorldStateDB` cũ bằng `KVStore`.
-   - Cập nhật logic phục hồi trạng thái sau crash: node khởi chạy sẽ tự động đọc checkpoint từ `cf_state` của RocksDB và quét phần WAL còn lại để đồng bộ.
-4. **Kiểm thử:** Viết script kiểm tra khả năng lưu trữ bền vững (Persistence) của RocksDB khi tắt và khởi chạy lại tiến trình node.
+#### 1.1 Định dạng thông điệp PBFT (cập nhật `MsgType`)
 
----
+```python
+PRE_PREPARE = 101   # {type, view, seq, digest, request, sender}
+PREPARE     = 102   # {type, view, seq, digest, sender}
+COMMIT      = 103   # {type, view, seq, digest, sender}
+CHECKPOINT  = 104   # {type, seq, digest, sender}
+VIEW_CHANGE = 105   # {type, view, new_view, last_seq, prepared_certs, sender}
+NEW_VIEW    = 106   # {type, view, new_view, V, O, sender}  (V = tập view‑change, O = tập pre‑prepare)
+CLIENT_REQ  = 107   # {type, client_id, seq, operation, timestamp, signature}
+CLIENT_REPLY= 108   # {type, view, seq, result, sender, signature}
+```
 
-### 🤝 PHASE 4 – Giao thức PBFT tiêu chuẩn (Practical Byzantine Fault Tolerance)
+> `digest` = SHA‑256 của request/operation; `request` chứa dữ liệu giao dịch.
 
-**Mục tiêu:** Thay thế giao thức đồng thuận đơn giản bằng thuật toán PBFT chuẩn chỉnh với khả năng chịu Byzantine thực tế.
+#### 1.2 Máy trạng thái PBFT (viết trong `consensus/pbft.py`)
 
-**Các bước thực hiện:**
-1. Tạo module `consensus/pbft.py` để định nghĩa State Machine PBFT.
-2. Triển khai thuật toán PBFT qua các pha:
-   - **Pre-prepare:** Node Leader (được chọn dựa trên view number hiện tại) gán nhãn Sequence Number cho giao dịch và broadcast thông điệp Pre-prepare tới toàn mạng.
-   - **Prepare:** Các node nhận thông điệp Pre-prepare, xác thực tính hợp lệ của giao dịch, sau đó broadcast thông điệp Prepare.
-   - **Commit:** Khi mỗi node thu thập đủ $2f$ thông điệp Prepare hợp lệ khớp với đề xuất (tổng cộng $2f+1$ bao gồm chính nó), node broadcast thông điệp Commit.
-   - **Execute:** Khi thu thập đủ $2f+1$ thông điệp Commit hợp lệ, node thực thi giao dịch, lưu vào `cf_ledger` và trả kết quả về cho client.
-3. Triển khai View Change protocol (`consensus/view_change.py`):
-   - Khi node phát hiện Leader không tiến triển trong khoảng thời gian timeout, nó sẽ broadcast thông điệp `VIEW-CHANGE` yêu cầu chuyển sang view tiếp theo.
-   - Thu thập đủ $2f+1$ thông điệp `VIEW-CHANGE` để bầu chọn và xác nhận Leader mới phát hành thông điệp `NEW-VIEW`.
-4. Lưu toàn bộ trạng thái tin nhắn PBFT vào Column Family `cf_pbft_log` trong RocksDB để đảm bảo tính khôi phục trạng thái chuẩn xác sau crash.
-5. **Kiểm thử:** Mô phỏng lỗi Byzantine (Node 0 gửi các thông điệp Pre-prepare mâu thuẫn cho các node khác nhau), kiểm chứng hệ thống vẫn đạt đồng thuận an toàn và nhất quán dữ liệu trên các node trung thực.
+- **Khởi tạo:**
+  - `view = 0`, `last_executed_seq = 0`, `stable_checkpoint_seq = 0`.
+  - Ba tập tin `request_store`, `prepare_log`, `commit_log` theo key là `(seq, digest)`.
+  - Sử dụng RocksDB để lưu các log này (column family `pbft_log`).
 
----
+- **Xử lý request:**
+  - Khi node là leader của view hiện tại, nhận `CLIENT_REQ` → gán `seq` mới → tạo `PRE_PREPARE` (gồm view, seq, digest của request) → broadcast.
+  - Backup node nhận `PRE_PREPARE`: kiểm tra view, seq (không trùng lặp), digest khớp với request → chấp nhận → broadcast `PREPARE`.
 
-### 🐳 PHASE 5 – Container hóa (Docker) và Client độc lập
+- **Chuẩn bị và Commit:**
+  - Khi nhận được `2f+1` `PREPARE` khớp (cùng view, seq, digest) → node broadcast `COMMIT`.
+  - Khi nhận `2f+1` `COMMIT` khớp → **thực thi** request (cập nhật state, ghi ledger), gửi `CLIENT_REPLY` cho client.
 
-**Mục tiêu:** Đóng gói toàn bộ hệ thống chạy trên Docker Compose và phát triển Client tương tác bên ngoài.
+- **Checkpoint:**
+  - Sau mỗi `K` giao dịch (vd 100), node tính digest của trạng thái hiện tại và broadcast `CHECKPOINT ⟨seq, digest⟩`.
+  - Khi nhận `2f+1` CHECKPOINT cùng seq/digest → đánh dấu `stable_checkpoint = seq`, xóa các log PBFT cũ (bên dưới seq) và cắt tỉa RocksDB WAL.
 
-**Các bước thực hiện:**
-1. Viết `Dockerfile` cho các node chạy trên môi trường Linux tối giản (ví dụ: `python:3.11-slim`), cài đặt RocksDB dependencies và các Python requirements.
-2. Viết file `docker-compose.yml` để tự động khởi chạy 4 service node (`node0` đến `node3`) trên một mạng ảo bridge. Mount thư mục dữ liệu RocksDB ra ngoài máy host.
-3. Tạo file `client.py` chạy độc lập ngoài container:
-   - Nhận giao dịch từ bàn phím hoặc file, ký giao dịch bằng Private Key của client.
-   - Gửi giao dịch đến cổng HTTP/TCP của Node Leader.
-   - Chờ đợi và xác thực phản hồi (đã kèm chữ ký số) từ ít nhất $f+1$ node để đảm bảo giao dịch đã được commit thực tế.
-4. Cập nhật `main.py` thành công cụ điều phối chạy thử: tự khởi chạy Docker, kích hoạt client gửi giao dịch demo và tổng hợp kết quả.
+- **View‑change (viết trong `consensus/view_change.py`):**
+  - Khi timeout (không có tiến triển), node broadcast `VIEW_CHANGE` gửi kèm:
+    - `last_seq` đã thực thi.
+    - Tập hợp các `⟨PREPARE⟩` message đã nhận cho các request chưa commit (từ `last_seq+1` trở lên) làm bằng chứng (`prepared_certs`).
+  - Leader mới (`new_view = v+1`) chờ `2f+1` VIEW_CHANGE. Sau đó:
+    - Xác định tập `O` các request đã được chuẩn bị (có ít nhất `2f+1` PREPARE trong tập bằng chứng).
+    - Phát `NEW_VIEW` chứa danh sách VIEW_CHANGE nhận được và tập `O` (các PRE‑PREPARE tương ứng).
+    - Sau khi các node nhận NEW_VIEW, chúng cập nhật view mới và replay các request trong `O` nếu chưa thực thi.
 
----
+> **Lưu ý:** Toàn bộ thông điệp được ký Ed25519 trước khi gửi.
 
-### 🧪 PHASE 6 – Kiểm thử tích hợp toàn diện (Integration Testing)
+#### 1.3 Tích hợp với RocksDB
 
-**Mục tiêu:** Viết các kịch bản kiểm thử tự động bao phủ toàn bộ các trường hợp lỗi mạng, crash và Byzantine.
-
-**Các test case bắt buộc:**
-- **Test Case 1: Lỗi mạng ngẫu nhiên (Network Latency & Loss):** Sử dụng `tc` hoặc công cụ mô phỏng để tạo trễ và mất gói tin giữa các node, kiểm tra khả năng đạt đồng thuận.
-- **Test Case 2: Phục hồi sau Crash (Crash Recovery):** Tắt đột ngột (`docker stop`) một node trung thực trong lúc hệ thống đang đồng thuận giao dịch $\rightarrow$ khởi động lại node $\rightarrow$ kiểm tra dữ liệu của node đó được đồng bộ về trạng thái mới nhất từ RocksDB và các node khác.
-- **Test Case 3: Chống tấn công Byzantine:** Mô phỏng node Byzantine thực hiện gửi thông tin mâu thuẫn, kiểm tra hệ thống có bị phân rã dữ liệu hay không.
+- Column family `pbft_log`: lưu các message quan trọng (PRE_PREPARE, PREPARE, COMMIT) để khôi phục view‑change sau crash.  
+- Khi node khởi động: nạp checkpoint state từ `state::checkpoint`, replay các giao dịch sau checkpoint bằng cách đọc `ledger` hoặc `pbft_log`.
 
 ---
 
-### 📖 PHASE 7 – Tài liệu & Triển khai
+### PHASE 2 – Kết nối mạng bền vững & mô phỏng điều kiện thực
 
-**Mục tiêu:** Viết tài liệu hướng dẫn vận hành chi tiết.
+**Mục tiêu:** Thay thế kiểu mở socket tạm bằng pool kết nối duy trì, thêm heartbeat.
 
-**Các bước thực hiện:**
-1. Tạo script `run_demo.sh` để người dùng chỉ cần chạy 1 click là có thể khởi tạo cụm mạng docker, chạy client gửi giao dịch và hiển thị ledger cuối cùng.
-2. Cập nhật `README.md` hướng dẫn cấu hình tham số mạng, cài đặt môi trường và các lệnh chạy test case chi tiết.
+1. **TCP Connection Pool (`network/connection_pool.py`):**
+   - Khi khởi động, mỗi node mở socket đến tất cả các node khác. Nếu kết nối thất bại, định kỳ thử lại.
+   - Các hàm `send_msg(dst, msg)` gửi qua kết nối có sẵn; nếu mất, chuyển sang hàng đợi chờ.
+
+2. **Heartbeat:**
+   - Mỗi 1 giây gửi `PING`, đối tác phải trả lời `PONG`. Nếu sau 3 giây không nhận được → đánh dấu node đó `suspected`, có thể kích hoạt view‑change nếu đó là leader.
+
+3. **Mô phỏng mạng:**
+   - Trong `docker-compose.yml`, thêm `cap_add: NET_ADMIN` cho mỗi service.
+   - Cung cấp script `simulate_network.sh` dùng `tc` để thêm delay/packet loss theo tỉ lệ.
+
+---
+
+### PHASE 3 – Client độc lập
+
+**Mục tiêu:** Tạo một chương trình client gửi giao dịch và xác minh kết quả.
+
+1. `client.py`:
+   - Nhận tham số dòng lệnh: `--node <host:port>`, `--key <private_key_hex>`, `--op "A chuyen 10 cho B"`.
+   - Tạo `CLIENT_REQ` message (kèm timestamp, client_id), ký bằng private key.
+   - Gửi request đến node chỉ định (có thể thử đến khi tìm đúng leader – node sẽ trả lời redirect nếu không phải leader).
+   - Chờ `CLIENT_REPLY` từ các node. Khi nhận đủ `f+1` reply giống nhau (kết quả và chữ ký hợp lệ) → in ra thành công.
+
+2. Node xử lý `CLIENT_REQ`:
+   - Kiểm tra chữ ký, giao dịch hợp lệ.
+   - Nếu không phải leader: trả lời `REDIRECT` chứa địa chỉ leader hiện tại.
+   - Sau khi thực thi, gửi `CLIENT_REPLY` đã ký.
+
+---
+
+### PHASE 4 – Docker hóa và tự động hóa kiểm thử
+
+**Mục tiêu:** Đóng gói, chạy được với một lệnh, và có kịch bản kiểm thử tích hợp.
+
+1. **Dockerfile:** đã có, cần đảm bảo cài đúng dependencies (`rocksdict`, `cryptography`).
+2. **docker-compose.yml:**  
+   - 4 dịch vụ `node0..node3`, mạng bridge tĩnh.  
+   - Service `client` (tùy chọn) có thể chạy script `run_client.sh`.  
+   - Cấu hình healthcheck cho mỗi node dựa trên heartbeat.
+3. **Script `run_demo.sh`:**
+   ```bash
+   docker-compose up -d
+   sleep 5  # chờ các node khởi động
+   python client.py --node node0:5000 --op "A chuyen 10 cho B"
+   python client.py --node node1:5001 --op "B chuyen 5 cho C"
+   # ... kiểm tra ledger từ container
+   docker-compose logs node0
+   ```
+4. **Testing (`tests/integration_test.py`):**
+   - Sử dụng `pytest` + `docker` Python SDK để:
+     - Khởi tạo cluster.
+     - Gửi giao dịch qua client, kiểm tra ledger đồng nhất.
+     - Mô phỏng crash (`docker kill node2`) → khởi động lại → kiểm tra dữ liệu sau phục hồi.
+     - Mô phỏng Byzantine (gửi message sai từ node0) → kiểm tra an toàn.
+     - Mô phỏng network partition bằng cách tạm ngắt mạng của node0, sau đó khôi phục.
+
+---
+
+### PHASE 5 – Tài liệu và đóng gói
+
+- Cập nhật `README.md`: mô tả kiến trúc, cách chạy, các kịch bản lỗi.
+- Viết `ARCHITECTURAL_DECISIONS.md` (nếu cần) giải thích lý do chọn PBFT, RocksDB, Ed25519.
+- Tạo `Makefile` để build, test, clean.
+- Đảm bảo `requirements.txt` đầy đủ.
+
+---
+
+## ✅ TIÊU CHÍ HOÀN THÀNH
+
+| Tiêu chí | Mô tả |
+|----------|-------|
+| **Mạng thực** | Các node giao tiếp qua TCP với connection pool, heartbeat |
+| **Bảo mật** | Mọi thông điệp được ký Ed25519, xác minh chữ ký trước khi xử lý |
+| **Đồng thuận** | PBFT đầy đủ: Pre‑prepare, Prepare, Commit, Checkpoint, View‑change an toàn |
+| **Lưu trữ** | RocksDB với WAL, state checkpoint, replay khôi phục sau crash |
+| **Khách hàng** | Client ký giao dịch, gửi đến node, nhận reply từ ≥ f+1 node |
+| **Docker** | Cluster chạy trong Docker Compose, có thể mở rộng số node |
+| **Kiểm thử** | Unit tests, integration tests tự động với các kịch bản lỗi |
+| **Demo** | Chạy `run_demo.sh` hoàn chỉnh |
