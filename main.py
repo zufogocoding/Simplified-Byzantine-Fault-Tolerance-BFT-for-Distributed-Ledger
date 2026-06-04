@@ -23,6 +23,7 @@ Cau truc project:
 Chay: python main.py
 """
 
+import os
 import sys
 import time
 import json
@@ -55,6 +56,13 @@ if __name__ == "__main__":
     for i in range(NUM_SITES):
         Logger(i).clear()
         WAL(i).clear()
+        state_file = f"wal/site_{i}_state.json"
+        if os.path.exists(state_file):
+            try:
+                os.remove(state_file)
+            except Exception:
+                pass
+
 
     # Khoi tao queue + event
     # [FIX 10] Dung list thay vi dict — giam overhead, truy cap nhanh hon
@@ -135,16 +143,19 @@ if __name__ == "__main__":
     print("-" * 60)
     print()
 
-    # [FIX 10] Drain queue cu truoc khi tao moi
-    # Queue cu co the con message orphan tu truoc khi crash.
-    # Neu khong drain, message cu se bi leak (memory leak nho).
+    # [FIX 10] Drain queue cu de loai bo message cu truoc khi crash
+    # Khong thay the doi tuong Queue vi cac Site khac van giu tham chieu den Queue nay
     old_q = qs[CRASH_SITE]
+    drain_count = 0
     while not old_q.empty():
         try:
             old_q.get_nowait()
+            drain_count += 1
         except queue.Empty:
             break
-    qs[CRASH_SITE] = mgr.Queue()
+    if drain_count > 0:
+        print("[Main] Da drain %d tin nhan ton tu Site %d" % (drain_count, CRASH_SITE))
+
     p_recover = multiprocessing.Process(
         target=site_main, args=(CRASH_SITE, qs, False, tx1, None, shutdown)
     )

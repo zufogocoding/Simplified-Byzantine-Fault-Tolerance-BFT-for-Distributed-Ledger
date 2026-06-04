@@ -55,6 +55,7 @@ from config import (
 from logger import Logger
 from wal import WAL
 from network import sign_message, verify_signature, net_send, net_broadcast
+from storage import WorldStateDB
 
 
 # ============================================================
@@ -309,7 +310,7 @@ def listen_for_recovery(qs, sid, tx_id, my_vote, shutdown, log):
 
 
 def process_transaction(
-    sid, qs, tx, is_malicious, crash_after, shutdown, log, wal, ledger
+    sid, qs, tx, is_malicious, crash_after, shutdown, log, wal, ledger, db
 ):
     """
     [FIX 7] Xu ly mot giao dich — da tach thanh cac ham con.
@@ -318,7 +319,7 @@ def process_transaction(
       2. Vote + broadcast (trung thuc hoac equivocation)
       3. Thu thap phieu
       4. Ra quyet dinh (quorum 2f+1)
-      5. [FIX 3] Ghi vao ledger neu COMMIT
+      5. [FIX 3] Ghi vao ledger neu COMMIT và cập nhật World State DB
       6. Lang nghe ho tro phuc hoi
     """
     tx_id = tx["tx_id"]
@@ -409,6 +410,25 @@ def process_transaction(
             "LEDGER_APPEND",
             "tx_id=%d | Da ghi vao ledger (size=%d)" % (tx_id, len(ledger)),
         )
+        
+        # --- CẬP NHẬT WORLD STATE DB ---
+        # Parse text log đơn giản: "A chuyen 10 cho B"
+        try:
+            parts = tx["data"].split(" ")
+            src = parts[0]
+            amount = int(parts[2])
+            dst = parts[4]
+            success = db.transfer(src, dst, amount)
+            if success:
+                log.info("STATE_DB_UPDATE", "Chuyen %d tu %s sang %s thanh cong. Balance %s: %d, %s: %d" % 
+                         (amount, src, dst, src, db.get_balance(src), dst, db.get_balance(dst)))
+                # Giả lập tạo checkpoint sau mỗi transaction
+                db.save_checkpoint(tx_id)
+                log.info("STATE_DB_CHECKPOINT", "Da tao checkpoint tai TX %d" % tx_id)
+            else:
+                log.warning("STATE_DB_FAIL", "Giao dich that bai do khong du so du!")
+        except Exception as e:
+            log.info("STATE_DB_ERROR", "Khong the parse transaction data: %s" % str(e))
     else:
         log.info("LEDGER_SKIP", "tx_id=%d | Khong ghi vao ledger (ABORT)" % tx_id)
 
@@ -419,6 +439,7 @@ def process_transaction(
     listen_for_recovery(qs, sid, tx_id, my_vote, shutdown, log)
 
     log.info("TX_END", "tx_id=%d | === KET THUC XU LY ===" % tx_id)
+
 
 
 # ============================================================
@@ -444,6 +465,7 @@ def site_main(sid, qs, is_malicious, tx_list, crash_on_tx, shutdown):
         random.seed(os.getpid())
     log = Logger(sid)
     wal = WAL(sid)
+    db = WorldStateDB(sid)
 
     # [FIX 3] Khoi phuc ledger tu WAL (cho TX da commit truoc crash)
     ledger = wal.rebuild_ledger(TRANSACTIONS)
@@ -465,8 +487,9 @@ def site_main(sid, qs, is_malicious, tx_list, crash_on_tx, shutdown):
 
         crash_after = (crash_on_tx == tx_id) if crash_on_tx else False
         process_transaction(
-            sid, qs, tx, is_malicious, crash_after, shutdown, log, wal, ledger
+            sid, qs, tx, is_malicious, crash_after, shutdown, log, wal, ledger, db
         )
+
 
     # In ledger cuoi cung
     log.info("LEDGER_FINAL", "So cai: %s" % json.dumps(ledger, ensure_ascii=False))
