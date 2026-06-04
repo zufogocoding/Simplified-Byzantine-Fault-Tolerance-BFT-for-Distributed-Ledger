@@ -30,6 +30,14 @@ class Logger:
             f.flush()
             os.fsync(f.fileno())
 
+    def warning(self, event, detail, do_print=True):
+        """Ghi mot dong log warning."""
+        self.info(f"WARNING_{event}", detail, do_print)
+
+    def error(self, event, detail, do_print=True):
+        """Ghi mot dong log error."""
+        self.info(f"ERROR_{event}", detail, do_print)
+
     def clear(self):
         """Xoa file log."""
         try:

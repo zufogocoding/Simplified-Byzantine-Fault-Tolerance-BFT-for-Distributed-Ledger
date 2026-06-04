@@ -40,10 +40,13 @@ class MsgType(IntEnum):
     PRE_PREPARE = 101
     PREPARE = 102
     COMMIT = 103
-    VIEW_CHANGE = 104
-    NEW_VIEW = 105
-    CLIENT_REQUEST = 106
-    CLIENT_REPLY = 107
+    CHECKPOINT = 104
+    VIEW_CHANGE = 105
+    NEW_VIEW = 106
+    CLIENT_REQUEST = 107
+    CLIENT_REPLY = 108
+    PING = 109
+    PONG = 110
 
 
 # Gia tri trang thai (backward-compatible)
@@ -63,10 +66,13 @@ MSG_DEC = MsgType.DEC
 MSG_PRE_PREPARE = MsgType.PRE_PREPARE
 MSG_PREPARE = MsgType.PREPARE
 MSG_COMMIT = MsgType.COMMIT
+MSG_CHECKPOINT = MsgType.CHECKPOINT
 MSG_VIEW_CHANGE = MsgType.VIEW_CHANGE
 MSG_NEW_VIEW = MsgType.NEW_VIEW
 MSG_CLIENT_REQUEST = MsgType.CLIENT_REQUEST
 MSG_CLIENT_REPLY = MsgType.CLIENT_REPLY
+MSG_PING = MsgType.PING
+MSG_PONG = MsgType.PONG
 
 
 # ============================================================
@@ -90,10 +96,10 @@ class BFTConfig:
     # --- Tham so mang TCP ---
     node_addresses: Dict[int, Tuple[str, int]] = field(
         default_factory=lambda: {
-            0: ("localhost", 5000),
-            1: ("localhost", 5001),
-            2: ("localhost", 5002),
-            3: ("localhost", 5003),
+            0: ("node0" if os.environ.get("BFT_DOCKER") else "localhost", 5000),
+            1: ("node1" if os.environ.get("BFT_DOCKER") else "localhost", 5001),
+            2: ("node2" if os.environ.get("BFT_DOCKER") else "localhost", 5002),
+            3: ("node3" if os.environ.get("BFT_DOCKER") else "localhost", 5003),
         }
     )
     timeout: float = 4.0  # Timeout thu thap phieu (giay)

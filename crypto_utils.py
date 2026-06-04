@@ -166,3 +166,27 @@ def generate_deterministic_keypair(seed: bytes) -> tuple:
         format=PublicFormat.Raw,
     )
     return private_bytes, public_bytes
+
+
+# ============================================================
+# HASHING HELPERS
+# ============================================================
+
+
+import hashlib
+
+
+def compute_digest(request_data: bytes) -> str:
+    """
+    Tinh digest SHA-256 hex tu bytes.
+    """
+    return hashlib.sha256(request_data).hexdigest()
+
+
+def hash_message(msg_dict: dict) -> str:
+    """
+    Tinh digest SHA-256 hex tu message dict (khong kem signature).
+    """
+    msg_copy = {k: v for k, v in msg_dict.items() if k != "signature"}
+    return compute_digest(pack_message(msg_copy))
+

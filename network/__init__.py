@@ -11,7 +11,7 @@ from .tcp_client import send_message
 from crypto_utils import sign_message_real, verify_signature_real
 
 __all__ = ["TCPServer", "send_message", "sign_message", "verify_signature",
-           "net_send", "net_broadcast"]
+           "net_send", "net_broadcast", "register_connection_pool", "get_connection_pool"]
 
 
 def sign_message(msg, sender_id):
@@ -33,17 +33,46 @@ def verify_signature(msg):
     return verify_signature_real(public_key, msg)
 
 
+_CONNECTION_POOLS = {}
+
+
+def register_connection_pool(sid: int, node_addresses: dict):
+    """
+    Khoi tao va dang ky TCPConnectionPool cho node.
+    """
+    from .connection_pool import TCPConnectionPool
+    pool = TCPConnectionPool(sid, node_addresses)
+    _CONNECTION_POOLS[sid] = pool
+    return pool
+
+
+def get_connection_pool(sid: int):
+    """
+    Lay TCPConnectionPool cua mot node.
+    """
+    return _CONNECTION_POOLS.get(sid)
+
+
 def net_send(qs, src, dst, mtype, tx_id, **kw):
     """
     Gui tin nhan qua TCP socket toi node dich, co ky Ed25519.
+    Su dung connection pool neu co.
     """
+    # Khong tu gui message den chinh minh qua TCP
+    if src == dst:
+        return
+
     time.sleep(random.uniform(NET_MIN, NET_MAX))
     msg = {"type": mtype, "sender": src, "tx_id": tx_id}
     msg.update(kw)
     sign_message(msg, src)
 
-    host, port = NODE_ADDRESSES[dst]
-    success = send_message(host, port, msg)
+    pool = get_connection_pool(src)
+    if pool:
+        success = pool.send_message(dst, msg)
+    else:
+        host, port = NODE_ADDRESSES[dst]
+        success = send_message(host, port, msg)
     if not success:
         pass  # TODO: retry logic
 
@@ -52,3 +81,4 @@ def net_broadcast(qs, src, mtype, tx_id, **kw):
     """Broadcast tin nhan qua TCP den tat ca cac node."""
     for d in range(NUM_SITES):
         net_send(qs, src, d, mtype, tx_id, **kw)
+

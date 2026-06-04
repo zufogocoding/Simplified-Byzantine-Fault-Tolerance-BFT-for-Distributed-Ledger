@@ -1,34 +1,28 @@
 """
-[PHASE 4] View Change Protocol cho PBFT.
+[PHASE 1] View Change Protocol cho PBFT.
 
-Khi leader bi loi (timeout, gui message sai), cac backup node
-se thuc hien view change de bau leader moi.
-
-Quy trinh:
-  1. Backup phat hien leader khong hoat dong (timeout)
-  2. Backup broadcast VIEW-CHANGE message
-  3. Leader moi (view+1 % N) thu thap 2f+1 VIEW-CHANGE
-  4. Leader moi broadcast NEW-VIEW message
-  5. Tat ca node chuyen sang view moi
+Khi leader bi loi (timeout/heartbeat), cac backup node thuc hien view change
+bang cach gui bang chung prepared_certs va bau leader moi.
 """
 
 import time
 import threading
+import logging
 
 from config import config, NUM_SITES, QUORUM, F, TIMEOUT
-from network import net_broadcast, net_send, sign_message
+from network import net_broadcast, net_send, sign_message, verify_signature
 
 from config import MsgType
 MSG_VIEW_CHANGE = MsgType.VIEW_CHANGE
 MSG_NEW_VIEW = MsgType.NEW_VIEW
 
+logger = logging.getLogger(__name__)
+
 
 class ViewChangeManager:
     """
-    Quan ly view change protocol.
-    
-    Khi phat hien leader hien tai khong the tien trien (timeout),
-    backup node se khoi tao view change.
+    Quan ly view change protocol voi day du bang chung (prepared_certs)
+    va thiet lap view moi thong qua tin nhan NEW-VIEW.
     """
 
     def __init__(self, sid, log, pbft_engine):
@@ -42,16 +36,12 @@ class ViewChangeManager:
         self.view_change_timeout = TIMEOUT * 2.5
         self.lock = threading.RLock()
 
-
     def get_leader(self, view: int) -> int:
         """Xac dinh leader cho mot view."""
         return view % NUM_SITES
 
     def check_view_timeout(self):
-        """
-        Kiem tra xem da den luc can view change chua.
-        Goi dinh ky tu message loop.
-        """
+        """Kiem tra xem da den luc can view change chua."""
         if self.pbft.shutdown.is_set():
             return
 
@@ -64,23 +54,45 @@ class ViewChangeManager:
             self._initiate_view_change()
 
     def _initiate_view_change(self):
-        """Bat dau view change: broadcast VIEW-CHANGE message."""
+        """Bat dau view change: broadcast VIEW-CHANGE message kem prepared_certs."""
         new_view = self.pbft.view + 1
 
         with self.lock:
             self.view_change_in_progress = True
             self.pbft.view_change_sent = True
 
+        # Thu thap cac prepared_certs (chung chi chuan bi) tu log RocksDB/in-memory
+        prepared_certs = {}
+        last_executed = self.pbft.last_executed_seq
+
+        with self.pbft.lock:
+            for seq, req in self.pbft.requests.items():
+                if seq > last_executed:
+                    # Kiem tra neu da nhan du quorum prepares
+                    prepares_dict = req.get("prepares", {})
+                    if len(prepares_dict) >= QUORUM:
+                        # Lay pre-prepare log tu RocksDB
+                        digest = req["digest"]
+                        pre_prepare_logs = self.pbft.store.get_pbft_logs("pre_prepare", seq, digest)
+                        prepare_logs = self.pbft.store.get_pbft_logs("prepare", seq, digest)
+                        prepared_certs[str(seq)] = {
+                            "pre_prepare": pre_prepare_logs[0] if pre_prepare_logs else None,
+                            "prepares": prepare_logs,
+                        }
+
         self.log.info(
             "VIEW_CHANGE_START",
-            "Node %d: Bat dau view change tu view %d -> %d"
-            % (self.sid, self.pbft.view, new_view),
+            "Node %d: Yeu cau view change tu %d -> %d (last_seq=%d, %d certs)"
+            % (self.sid, self.pbft.view, new_view, last_executed, len(prepared_certs)),
         )
 
         # Broadcast VIEW-CHANGE
         net_broadcast(
             None, self.sid, MSG_VIEW_CHANGE, 0,
-            new_view=new_view, old_view=self.pbft.view,
+            new_view=new_view,
+            old_view=self.pbft.view,
+            last_seq=last_executed,
+            prepared_certs=prepared_certs,
         )
 
         print(
@@ -100,7 +112,10 @@ class ViewChangeManager:
         if new_view is None:
             return
 
-        # Kiem tra xem node nay co phai leader moi khong
+        # Chi nhan view_change cho view lon hon view hien tai
+        if new_view <= self.pbft.view:
+            return
+
         new_leader = self.get_leader(new_view)
         is_new_leader = (new_leader == self.sid)
 
@@ -121,17 +136,34 @@ class ViewChangeManager:
             self._send_new_view(new_view)
 
     def _send_new_view(self, new_view: int):
-        """Leader moi broadcast NEW-VIEW message."""
+        """Leader moi broadcast NEW-VIEW message chua tap hop VIEW_CHANGE va cac de xuat cu."""
         self.log.info(
             "NEW_VIEW",
-            "Leader moi View %d: broadcast NEW-VIEW" % new_view,
+            "Leader moi View %d: bat dau phat hanh NEW-VIEW" % new_view,
         )
+
+        # Thu thap V (danh sach cac tin nhan VIEW-CHANGE hop le)
+        with self.lock:
+            view_changes = list(self.view_changes_collected[new_view].values())
+
+        # Xac dinh tap O (cac request da chuan bi) de lam lai de xuat
+        O = {}
+        for vc in view_changes:
+            certs = vc.get("prepared_certs", {})
+            for seq_str, cert in certs.items():
+                # Kiem tra tinh hop le cua cert: phai co pre_prepare va >= 2f prepares
+                pre_prepare = cert.get("pre_prepare")
+                prepares = cert.get("prepares", [])
+                if pre_prepare and len(prepares) >= (QUORUM - 1): # quorum phieu chu ky khac self
+                    # Bieu quyet chon de xuat nay
+                    O[seq_str] = pre_prepare
 
         net_broadcast(
             None, self.sid, MSG_NEW_VIEW, 0,
             new_view=new_view,
+            V=view_changes,
+            O=O,
         )
-
 
         print(
             "*** NEW VIEW: Node %d la leader cua view %d ***"
@@ -139,13 +171,29 @@ class ViewChangeManager:
             flush=True,
         )
 
-        # Tu dong chuyen sang view moi
-        self._apply_new_view(new_view)
+        # Tu dong chuyen sang view moi va replay O
+        self._apply_new_view(new_view, O)
 
     def handle_new_view(self, msg: dict):
         """Xu ly NEW-VIEW message tu leader moi."""
         new_view = msg.get("new_view")
+        V = msg.get("V", [])
+        O = msg.get("O", {})
+
         if new_view is None:
+            return
+
+        if new_view <= self.pbft.view:
+            return # Bo qua tin nhan view cu
+
+        # Xac minh tinh trung thuc cua V (it nhat 2f+1 tin nhan VIEW-CHANGE co chu ky hop le)
+        valid_vc_count = 0
+        for vc in V:
+            if verify_signature(vc) and vc.get("new_view") == new_view:
+                valid_vc_count += 1
+
+        if valid_vc_count < QUORUM:
+            self.log.error("NEW_VIEW_ERROR", "NEW-VIEW kem bang chung view changes khong du hoac khong hop le!")
             return
 
         self.log.info(
@@ -154,11 +202,11 @@ class ViewChangeManager:
             % (msg.get("sender"), new_view),
         )
 
-        self._apply_new_view(new_view)
+        self._apply_new_view(new_view, O)
 
-    def _apply_new_view(self, new_view: int):
+    def _apply_new_view(self, new_view: int, O: dict):
         """
-        Ap dung view moi: cap nhat view, reset trang thai.
+        Ap dung view moi: cap nhat view, reset trang thai va replay cac requests.
         """
         self.pbft.view = new_view
         self.pbft.view_change_sent = False
@@ -166,10 +214,9 @@ class ViewChangeManager:
 
         with self.lock:
             self.view_change_in_progress = False
-            # Giu lai view_changes_collected cho view moi nhat
-            to_keep = new_view
+            # Xoa cac view changes cu hon view hien tai
             for v in list(self.view_changes_collected.keys()):
-                if v < to_keep:
+                if v < new_view:
                     del self.view_changes_collected[v]
 
         leader = self.get_leader(new_view)
@@ -185,3 +232,13 @@ class ViewChangeManager:
             % (self.sid, new_view, leader),
             flush=True,
         )
+
+        # Replay cac de xuat tu leader trong O neu chua thuc thi
+        for seq_str, pre_prepare in O.items():
+            seq = int(seq_str)
+            tx = pre_prepare.get("request")
+            tx_id = pre_prepare.get("tx_id")
+            if seq > self.pbft.last_executed_seq:
+                self.log.info("VIEW_CHANGE_REPLAY", f"Replaying tx_id={tx_id} at seq={seq} after view change")
+                # Tu dong build lai prepare/commit hoac thuc thi truc tiep
+                self.pbft._execute_request(tx, seq)

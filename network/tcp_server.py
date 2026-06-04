@@ -80,41 +80,38 @@ class TCPServer:
 
     def _handle_connection(self, conn: socket.socket, addr: tuple):
         """
-        Xu ly mot ket noi: nhan toan bo du lieu, parse JSON,
-        day vao hang doi.
+        Xu ly mot ket noi dai han: doc tung dong message JSON duoc phan tach
+        bang ky tu xuong dong (\n) va day vao hang doi, lap lai cho den khi
+        doi tac dong ket noi.
         """
         try:
-            conn.settimeout(5.0)
-            data = b""
-            while True:
+            conn.settimeout(15.0)  # Heartbeat gui moi 1.5s, 15s timeout la an toan
+            buffer = b""
+            while self._running:
                 chunk = conn.recv(4096)
                 if not chunk:
                     break
-                data += chunk
-                # Kiem tra neu da nhan du message (ket thuc bang \n)
-                if b"\n" in data:
-                    break
-
-            if data:
-                # Co the co nhieu message trong mot goi tin
-                lines = data.decode("utf-8").strip().split("\n")
-                for line in lines:
-                    if not line.strip():
+                buffer += chunk
+                while b"\n" in buffer:
+                    line_bytes, _, rest = buffer.partition(b"\n")
+                    buffer = rest
+                    line = line_bytes.decode("utf-8").strip()
+                    if not line:
                         continue
                     try:
                         msg = json.loads(line)
-                        # In debug log ra console
-                        print(f"  [TCP Server {self.port}] Nhan message type={msg.get('type')} tu Node {msg.get('sender')}", flush=True)
+                        # An tin nhan PING/PONG kieu 109/110 de khoi ngap log console
+                        if msg.get('type') not in (109, 110):
+                            print(f"  [TCP Server {self.port}] Nhan message type={msg.get('type')} tu Node {msg.get('sender')}", flush=True)
                         self.incoming_queue.put(msg)
                     except json.JSONDecodeError as e:
                         logger.warning(
                             f"JSON loi tu {addr}: {e}, data={line[:100]}"
                         )
-
         except socket.timeout:
             logger.debug(f"Timeout khi nhan du lieu tu {addr}")
         except Exception as e:
-            logger.error(f"Loi khi xu ly ket noi tu {addr}: {e}")
+            logger.debug(f"Loi khi xu ly ket noi tu {addr}: {e}")
         finally:
             try:
                 conn.close()
