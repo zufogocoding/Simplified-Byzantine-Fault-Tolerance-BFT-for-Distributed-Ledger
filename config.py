@@ -47,6 +47,8 @@ class MsgType(IntEnum):
     CLIENT_REPLY = 108
     PING = 109
     PONG = 110
+    SYNC_REQUEST = 111
+    SYNC_RESPONSE = 112
 
 
 # Gia tri trang thai (backward-compatible)
@@ -73,6 +75,8 @@ MSG_CLIENT_REQUEST = MsgType.CLIENT_REQUEST
 MSG_CLIENT_REPLY = MsgType.CLIENT_REPLY
 MSG_PING = MsgType.PING
 MSG_PONG = MsgType.PONG
+MSG_SYNC_REQUEST = MsgType.SYNC_REQUEST
+MSG_SYNC_RESPONSE = MsgType.SYNC_RESPONSE
 
 
 # ============================================================
@@ -142,6 +146,8 @@ class BFTConfig:
             {"tx_id": 1, "data": "A chuyen 10 cho B"},
             {"tx_id": 2, "data": "B chuyen 5 cho C"},
             {"tx_id": 3, "data": "C chuyen 3 cho D"},
+            {"tx_id": 4, "data": "A chuyen 7 cho D"},
+            {"tx_id": 5, "data": "B chuyen 2 cho A"},
         ]
     )
 

@@ -83,7 +83,11 @@ class TCPServer:
         Xu ly mot ket noi dai han: doc tung dong message JSON duoc phan tach
         bang ky tu xuong dong (\n) va day vao hang doi, lap lai cho den khi
         doi tac dong ket noi.
+
+        Rieng CLIENT_REQUEST (type=107): giu ket noi de PBFT handler
+        gui phan hoi tren cung socket, thay vi mo ket noi moi.
         """
+        is_client_request = False
         try:
             conn.settimeout(15.0)  # Heartbeat gui moi 1.5s, 15s timeout la an toan
             buffer = b""
@@ -103,6 +107,14 @@ class TCPServer:
                         # An tin nhan PING/PONG kieu 109/110 de khoi ngap log console
                         if msg.get('type') not in (109, 110):
                             print(f"  [TCP Server {self.port}] Nhan message type={msg.get('type')} tu Node {msg.get('sender')}", flush=True)
+
+                        # CLIENT_REQUEST: giu socket de gui phan hoi tren cung ket noi
+                        if msg.get('type') == 107:  # MsgType.CLIENT_REQUEST
+                            msg['_client_conn'] = conn
+                            self.incoming_queue.put(msg)
+                            is_client_request = True
+                            return  # De PBFT handler quan ly socket nay
+
                         self.incoming_queue.put(msg)
                     except json.JSONDecodeError as e:
                         logger.warning(
@@ -113,7 +125,8 @@ class TCPServer:
         except Exception as e:
             logger.debug(f"Loi khi xu ly ket noi tu {addr}: {e}")
         finally:
-            try:
-                conn.close()
-            except OSError:
-                pass
+            if not is_client_request:
+                try:
+                    conn.close()
+                except OSError:
+                    pass

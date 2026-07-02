@@ -40,7 +40,7 @@ class ViewChangeManager:
         """Xac dinh leader cho mot view."""
         return view % NUM_SITES
 
-    def check_view_timeout(self):
+    def check_view_timeout(self, force=False):
         """Kiem tra xem da den luc can view change chua."""
         if self.pbft.shutdown.is_set():
             return
@@ -48,7 +48,7 @@ class ViewChangeManager:
         now = time.time()
         time_since_last = now - self.pbft.last_request_time
 
-        if time_since_last > self.view_change_timeout:
+        if force or time_since_last > self.view_change_timeout:
             if self.pbft.view_change_sent:
                 return  # Da gui view change roi
             self._initiate_view_change()
@@ -88,7 +88,7 @@ class ViewChangeManager:
 
         # Broadcast VIEW-CHANGE
         net_broadcast(
-            None, self.sid, MSG_VIEW_CHANGE, 0,
+            self.sid, MSG_VIEW_CHANGE, 0,
             new_view=new_view,
             old_view=self.pbft.view,
             last_seq=last_executed,
@@ -159,7 +159,7 @@ class ViewChangeManager:
                     O[seq_str] = pre_prepare
 
         net_broadcast(
-            None, self.sid, MSG_NEW_VIEW, 0,
+            self.sid, MSG_NEW_VIEW, 0,
             new_view=new_view,
             V=view_changes,
             O=O,
@@ -211,6 +211,8 @@ class ViewChangeManager:
         self.pbft.view = new_view
         self.pbft.view_change_sent = False
         self.pbft.last_request_time = time.time()
+        # Persist view number vao RocksDB de phuc hoi sau restart
+        self.pbft.store.save_view(new_view)
 
         with self.lock:
             self.view_change_in_progress = False
@@ -233,12 +235,22 @@ class ViewChangeManager:
             flush=True,
         )
 
-        # Replay cac de xuat tu leader trong O neu chua thuc thi
+        # Exponential backoff cho timeout
+        self.view_change_timeout = self.pbft.base_view_change_timeout * (2 ** new_view)
+
+        # Null Request liveness (Neu O rong va la leader, gui 1 No-Op)
+        if leader == self.sid and not O:
+            self.log.info("NEW_VIEW_NULL", "Tap O rong, phat Null Request de khoi dong view moi")
+            seq = self.pbft.sequence_manager.get_next_seq()
+            tx = {"tx_id": seq, "data": "NOOP", "client_id": "system"}
+            self.pbft._send_pre_prepare(tx, seq)
+
+        # Redo PRE-PREPARE cho cac request trong O
         for seq_str, pre_prepare in O.items():
             seq = int(seq_str)
             tx = pre_prepare.get("request")
             tx_id = pre_prepare.get("tx_id")
             if seq > self.pbft.last_executed_seq:
-                self.log.info("VIEW_CHANGE_REPLAY", f"Replaying tx_id={tx_id} at seq={seq} after view change")
-                # Tu dong build lai prepare/commit hoac thuc thi truc tiep
-                self.pbft._execute_request(tx, seq)
+                self.log.info("VIEW_CHANGE_REDO", f"Leader phat lai PRE-PREPARE cho tx_id={tx_id} at seq={seq} trong view moi")
+                if leader == self.sid:
+                    self.pbft._send_pre_prepare(tx, seq)

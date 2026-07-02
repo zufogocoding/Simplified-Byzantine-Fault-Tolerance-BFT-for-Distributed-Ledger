@@ -38,26 +38,57 @@ class TCPConnectionPool:
             t.start()
 
     def _keep_connected(self, dst: int, addr: tuple):
-        """Luong duy tri ket noi TCP lau dai den mot node."""
+        """Luong duy tri ket noi TCP lau dai den mot node.
+        - Tu dong phat hien socket chet bang cach gui heartbeat moi 1 giay.
+        - Neu socket chet (broken pipe / connection refused), dong va tao lai.
+        """
         host, port = addr
+        consecutive_failures = 0
         while self.running:
             with self.lock:
                 sock = self.connections.get(dst)
 
+            if sock is not None:
+                # Health check: gui newline de kiem tra socket con song khong (tranh no-op)
+                try:
+                    sock.settimeout(0.5)
+                    sock.send(b'\n')
+                    sock.settimeout(3.0)
+                    # Socket con song, reset dem loi
+                    consecutive_failures = 0
+                except Exception as e:
+                    # Socket da chet (broken pipe, connection reset, etc.)
+                    logger.warning(f"Node {self.sid}: Socket den Node {dst} KHONG CON SONG ({e}), tien hanh dong va tao lai...")
+                    with self.lock:
+                        if dst in self.connections:
+                            try:
+                                self.connections[dst].close()
+                            except Exception:
+                                pass
+                            del self.connections[dst]
+                    sock = None
+                    consecutive_failures += 1
+
             if sock is None:
                 try:
+                    # Resolve DNS de lay IP moi nhat (quan trong voi Docker/Podman)
+                    import socket as dns_resolver
+                    resolved_addr = dns_resolver.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_STREAM)
+                    real_host = resolved_addr[0][4][0]
+                    
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     s.settimeout(3.0)
-                    s.connect((host, port))
+                    s.connect((real_host, port))
                     with self.lock:
                         self.connections[dst] = s
-                    logger.info(f"Node {self.sid}: Da ket noi TCP thanh cong den Node {dst} ({host}:{port})")
-                except Exception:
-                    # Thu lai sau 2 giay neu that bai
-                    time.sleep(2.0)
+                    logger.info(f"Node {self.sid}: Da ket noi TCP thanh cong den Node {dst} ({real_host}:{port})")
+                    consecutive_failures = 0
+                except Exception as e:
+                    wait_time = min(2.0 * (1 + consecutive_failures), 10.0)  # Exponential backoff: 2s, 4s, 8s, 10s...
+                    logger.debug(f"Node {self.sid}: Ket noi that bai den Node {dst}: {e}, thu lai sau {wait_time}s")
+                    time.sleep(wait_time)
                     continue
             
-            # Neu da co socket, kiem tra dinh ky bang cach sleep 1s
             time.sleep(1.0)
 
     def send_message(self, dst: int, message: dict) -> bool:

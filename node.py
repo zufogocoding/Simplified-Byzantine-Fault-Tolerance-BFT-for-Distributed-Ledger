@@ -144,7 +144,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     sid = int(sys.argv[1])
-    is_malicious = sid in config.malicious_sites
+    is_malicious = (sid in config.malicious_sites) and ("--no-byzantine" not in sys.argv)
     crash_on_tx = config.crash_config.get(sid)
 
     node = Node(sid, is_malicious=is_malicious, crash_on_tx=crash_on_tx)

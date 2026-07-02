@@ -53,12 +53,7 @@ def get_connection_pool(sid: int):
     return _CONNECTION_POOLS.get(sid)
 
 
-def net_send(qs, src, dst, mtype, tx_id, **kw):
-    """
-    Gui tin nhan qua TCP socket toi node dich, co ky Ed25519.
-    Su dung connection pool neu co.
-    """
-    # Khong tu gui message den chinh minh qua TCP
+def net_send(src, dst, mtype, tx_id, **kw):
     if src == dst:
         return
 
@@ -77,8 +72,8 @@ def net_send(qs, src, dst, mtype, tx_id, **kw):
         pass  # TODO: retry logic
 
 
-def net_broadcast(qs, src, mtype, tx_id, **kw):
+def net_broadcast(src, mtype, tx_id, **kw):
     """Broadcast tin nhan qua TCP den tat ca cac node."""
     for d in range(NUM_SITES):
-        net_send(qs, src, d, mtype, tx_id, **kw)
+        net_send(src, d, mtype, tx_id, **kw)
 

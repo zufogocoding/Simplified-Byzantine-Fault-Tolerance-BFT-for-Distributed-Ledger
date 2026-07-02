@@ -195,7 +195,15 @@ class KVStore:
                         continue
             # Sap xep theo seq tang dan
             committed_entries.sort(key=lambda e: e.get("seq", 0))
+            
+            # Lay danh sach cac giao dich da co trong ledger de tranh trung lap
+            existing_txs = set(t.get("tx_id") for t in self.get_ledger())
+
             for entry in committed_entries:
+                tx_id = entry.get("tx_id")
+                if tx_id in existing_txs:
+                    continue
+
                 tx = entry.get("tx_data")
                 if tx and "data" in tx:
                     try:
@@ -204,8 +212,8 @@ class KVStore:
                         amount = int(parts[2])
                         dst = parts[4]
                         self.transfer(src, dst, amount)
-                        self.put_ledger(entry["tx_id"], tx)
-                        logger.info(f"Replayed WAL entry seq={entry.get('seq')}, tx_id={entry.get('tx_id')}")
+                        self.put_ledger(tx_id, tx)
+                        logger.info(f"Replayed WAL entry seq={entry.get('seq')}, tx_id={tx_id}")
                     except Exception as e:
                         logger.error(f"Error replaying WAL entry {entry}: {e}")
 
@@ -221,9 +229,11 @@ class KVStore:
                             keys_to_delete.append(k)
                     except (json.JSONDecodeError, TypeError):
                         continue
-            with self.db.write_batch() as batch:
-                for k in keys_to_delete:
-                    batch.delete(k)
+            from rocksdict import WriteBatch
+            batch = WriteBatch()
+            for k in keys_to_delete:
+                batch.delete(k)
+            self.db.write(batch)
             logger.info(f"Deleted old WAL entries below seq {below_seq} (removed {len(keys_to_delete)} entries)")
 
     def put_pbft_log(self, log_type: str, seq: int, digest: str, sender: int, msg: dict):
@@ -259,19 +269,51 @@ class KVStore:
                             keys_to_delete.append(k)
                     except Exception:
                         continue
-            with self.db.write_batch() as batch:
-                for k in keys_to_delete:
-                    batch.delete(k)
+            from rocksdict import WriteBatch
+            batch = WriteBatch()
+            for k in keys_to_delete:
+                batch.delete(k)
+            self.db.write(batch)
             logger.info(f"Deleted old PBFT logs below seq {below_seq} (removed {len(keys_to_delete)} entries)")
 
     def clear_all(self):
         """Xoa toan bo du lieu."""
         with self.lock:
             keys = list(self.db.keys())
-            with self.db.write_batch() as batch:
-                for k in keys:
-                    batch.delete(k)
+            from rocksdict import WriteBatch
+            batch = WriteBatch()
+            for k in keys:
+                batch.delete(k)
+            self.db.write(batch)
             self._wal_seq = 0
+
+    def save_view(self, view: int):
+        """Luu view number hien tai vao RocksDB (key: state::current_view)."""
+        with self.lock:
+            self.db[b"state::current_view"] = json.dumps({"view": view}).encode()
+
+    def load_view(self) -> int:
+        """Doc view number da persist tu RocksDB. Tra ve 0 neu chua co."""
+        with self.lock:
+            try:
+                val = self.db[b"state::current_view"]
+                return json.loads(val).get("view", 0)
+            except KeyError:
+                return 0
+
+    def save_last_seq(self, seq: int):
+        """Luu last_executed_seq vao RocksDB (key: state::last_seq)."""
+        with self.lock:
+            self.db[b"state::last_seq"] = json.dumps({"last_seq": seq}).encode()
+
+    def load_last_seq(self) -> int:
+        """Doc last_executed_seq da persist. Tra ve 0 neu chua co."""
+        with self.lock:
+            try:
+                val = self.db[b"state::last_seq"]
+                return json.loads(val).get("last_seq", 0)
+            except KeyError:
+                return 0
 
     def create_checkpoint(self, checkpoint_dir: str):
         """Tao RocksDB checkpoint."""
