@@ -1,115 +1,208 @@
-# 🎬 KỊCH BẢN VIDEO DEMO HỆ THỐNG PBFT DISTRIBUTED LEDGER THỰC TẾ
-*(Độ dài dự kiến: 5 - 7 phút)*
+# Kịch bản Video Demo: PBFT Distributed Ledger
 
-Kịch bản này hướng dẫn bạn thực hiện các thao tác trên màn hình (Visual) kết hợp với lời thoại thuyết minh (Audio) chi tiết bằng tiếng Việt để quay video demo đồ án trước hội đồng.
+*(Độ dài dự kiến: 6 - 8 phút)*
 
----
-
-## 📌 PHẦN 1: GIỚI THIỆU CHUNG (Thời gian: 0:00 - 1:00)
-
-*   **Visual (Hành động trên màn hình):**
-    *   Mở terminal hoặc trình soạn thảo mã nguồn VS Code, hiển thị cấu trúc thư mục của dự án `bft-ledger/`.
-    *   Trỏ chuột vào các file cốt lõi: [config.py](file:///home/trongzufo/csdlpt/config.py), [consensus/pbft.py](file:///home/trongzufo/csdlpt/consensus/pbft.py), [storage/rocksdb_store.py](file:///home/trongzufo/csdlpt/storage/rocksdb_store.py), [network/tcp_server.py](file:///home/trongzufo/csdlpt/network/tcp_server.py).
-*   **Audio (Lời thoại thuyết minh):**
-    *   "Xin chào Thầy/Cô và các bạn. Em tên là Phạm Thành Nhựt Trọng. Hôm nay, em xin phép được demo sản phẩm đồ án môn **Cơ sở dữ liệu phân tán** với đề tài: **Hệ thống Sổ cái Phân tán chịu lỗi Byzantine (PBFT) thực tế**."
-    *   "Từ phiên bản mô phỏng thô sơ ban đầu chạy trên các tiến trình dùng chung bộ nhớ và hàng đợi Queue, em đã nâng cấp toàn diện dự án lên một hệ thống phân tán thực tế chạy trên mạng TCP socket thật. Mạng lưới được thiết lập với chữ ký số Ed25519 để chống giả mạo, cơ sở dữ liệu RocksDB (LSM-Tree) làm công cụ lưu trữ ghi nhật ký WAL/Ledger và được đóng gói hoàn chỉnh bằng Docker Container."
-    *   "Sau đây, em xin phép được khởi động hệ thống và trình diễn các tính năng vượt trội của đồ án."
+Kịch bản này hướng dẫn thực hiện các thao tác trên màn hình kết hợp lời thoại thuyết minh, bao gồm **3 kịch bản thực nghiệm** chứng minh đầy đủ tính năng của hệ thống.
 
 ---
 
-## 📌 PHẦN 2: KHỞI CHẠY MẠNG LƯỚI PHÂN TÁN (Thời gian: 1:00 - 2:00)
+## Chuẩn bị trước khi quay
 
-*   **Visual (Hành động trên màn hình):**
-    *   Mở terminal, gõ lệnh `cat docker-compose.yml` để show cấu trúc 4 node chạy độc lập.
-    *   Gõ lệnh khởi động cụm node:
-        ```bash
-        docker-compose down && docker-compose up -d
-        ```
-    *   Chờ vài giây, gõ `docker-compose ps` để chứng minh cả 4 node (`node0`, `node1`, `node2`, `node3`) đang chạy nền bình thường trên các port TCP từ 5000 đến 5003.
-*   **Audio (Lời thoại thuyết minh):**
-    *   "Đầu tiên, hệ thống của chúng ta bao gồm N = 4 node. Em cấu hình 4 node này chạy độc lập dưới dạng các container Docker, tương ứng với 4 site phân tán thực sự. Node 0 đóng vai trò là Leader mặc định trong View 0."
-    *   "Em sẽ sử dụng lệnh `docker-compose up -d` để khởi chạy mạng lưới. Như Thầy/Cô có thể thấy trên màn hình, cả 4 node đã khởi động thành công và đang lắng nghe kết nối TCP trên các cổng dịch vụ riêng biệt từ 5000 đến 5003."
+```bash
+# 1. Reset toàn bộ DB và logs
+make down
+make clean-db
+make clean-logs
 
----
+# 2. Build lại image Docker
+make build
 
-## 📌 PHẦN 3: GỬI GIAO DỊCH & CƠ CHẾ REDIRECT (Thời gian: 2:00 - 3:30)
-
-*   **Visual (Hành động trên màn hình):**
-    *   Chạy Client gửi giao dịch đến `node1` (là Backup Node, không phải Leader):
-        ```bash
-        python client.py --node localhost:5001 --op "A chuyen 10 cho B"
-        ```
-    *   Chỉ tay vào các dòng log in ra trên Terminal của Client:
-        *   `Redirect: Node thong bao gui ve Leader moi...`
-        *   `Gui lai...`
-        *   `Nhan SUCCESS tu Node 2, Node 1...`
-        *   `Giao dich hoan thanh thanh cong!`
-*   **Audio (Lời thoại thuyết minh):**
-    *   "Tiếp theo, em sẽ chạy một tiến trình Client độc lập để gửi yêu cầu giao dịch: *'A chuyển 10 cho B'*. Client này sẽ ký giao dịch bằng thuật toán Ed25519 bằng khóa bí mật của chính nó."
-    *   "Thay vì gửi trực tiếp đến Leader (Node 0), em cố tình gửi giao dịch này đến Node 1 là một nút Backup. Hãy quan sát phản hồi từ màn hình."
-    *   "Rất tuyệt vời! Node 1 đã nhận diện nó không phải Leader, lập tức từ chối và trả về thông báo chuyển hướng (**Redirect**) chỉ định cổng của Leader là Node 0 (localhost:5000). Client đã tự động kết nối lại đến Node 0 và gửi lại giao dịch."
-    *   "Leader nhận tin, xác thực chữ ký của Client, băm giao dịch và kích hoạt quy trình đồng thuận PBFT 3 pha chéo: Pre-prepare, Prepare, và Commit. Khi Client nhận đủ $f+1$ (tức là 2) chữ ký phản hồi xác nhận thành công từ các node trung thực, giao dịch chính thức được coi là hoàn tất."
+# 3. Mở 4 cửa sổ terminal sẵn:
+#    Terminal A: logs Node 0 (Leader)
+#    Terminal B: logs Node 1 (Backup)
+#    Terminal C: logs Node 2, 3
+#    Terminal D: chạy client TUI
+```
 
 ---
 
-## 📌 PHẦN 4: GIẢ LẬP SỰ CỐ CRASH & PHỤC HỒI ROCKSDB (Thời gian: 3:30 - 5:00)
+## Phần 1: Giới thiệu hệ thống (0:00 - 1:00)
 
-*   **Visual (Hành động trên màn hình):**
-    *   Thực hiện tắt Node 1 bằng lệnh:
-        ```bash
-        docker-compose stop node1
-        ```
-    *   Gửi tiếp một giao dịch mới qua Client để chứng minh hệ thống vẫn hoạt động:
-        ```bash
-        python client.py --node localhost:5000 --op "B chuyen 5 cho C"
-        ```
-    *   Bật lại Node 1 bằng lệnh:
-        ```bash
-        docker-compose start node1
-        ```
-    *   Xem log của Node 1 để chứng minh nó khôi phục trạng thái bằng RocksDB WAL:
-        ```bash
-        docker-compose logs node1 | grep -E "RESTART|RECOVERY|Stable Checkpoint"
-        ```
-*   **Audio (Lời thoại thuyết minh):**
-    *   "Bây giờ, em sẽ giả lập một sự cố sập nguồn mạng thực tế. Em sẽ cưỡng bức tắt container Node 1 bằng lệnh `docker-compose stop node1`."
-    *   "Lúc này hệ thống chỉ còn 3 nút hoạt động. Theo lý thuyết PBFT với $N=4, f=1$, hệ thống cần tối thiểu $2f+1=3$ nút trung thực để duy trì đồng thuận. Do đó, khi em gửi giao dịch mới *'B chuyển 5 cho C'*, hệ thống vẫn đạt Quorum thành công và cam kết giao dịch bình thường."
-    *   "Tiếp theo, em khởi động lại Node 1 bằng lệnh `docker-compose start node1`."
-    *   "Ngay sau khi khởi động, Node 1 phát hiện nó bị thiếu hụt dữ liệu so với mạng lưới. Nó tiến hành quét tệp lưu trữ bền vững RocksDB của mình, đọc stable checkpoint gần nhất, và thực thi lại các bản ghi nhật ký ghi trước (Write-Ahead Log - WAL) để khôi phục World State số dư tài khoản về trạng thái mới nhất."
-    *   "Trên log của Node 1 hiển thị rõ quá trình khôi phục: đọc checkpoint, gửi request đồng bộ trạng thái và ghi đè dữ liệu thành công."
+**Visual:**
+- Hiển thị cấu trúc thư mục `csdlpt/` trong VS Code
+- Trỏ vào các file cốt lõi: `consensus/pbft.py`, `consensus/view_change.py`, `storage/rocksdb_store.py`, `network/connection_pool.py`
+- Chạy: `cat docker-compose.yml` để show cấu hình 4 container
+
+**Lời thoại:**
+> *"Em xin chào Thầy/Cô. Em tên Phạm Thành Nhựt Trọng, mã sinh viên N23DCCN132. Hôm nay em demo đề tài Cơ sở dữ liệu phân tán: Hệ thống Sổ cái Phân tán chịu lỗi Byzantine thực tế, triển khai giao thức PBFT theo đặc tả gốc Castro-Liskov 1999.*
+>
+> *Hệ thống gồm 4 tầng: Mạng TCP Connection Pool, Đồng thuận PBFT 3 pha, Lưu trữ RocksDB, và Client độc lập. Toàn bộ thông điệp được ký số bằng Ed25519. Em sẽ demo 3 kịch bản chính: giao dịch bình thường, crash và phục hồi, và phát hiện node Byzantine.*"
 
 ---
 
-## 📌 PHẦN 5: XÁC MINH CƠ SỞ DỮ LIỆU ROCKSDB & TỔNG KẾT (Thời gian: 5:00 - 6:00)
+## Phần 2: Khởi động mạng lưới (1:00 - 1:45)
 
-*   **Visual (Hành động trên màn hình):**
-    *   Gõ lệnh kiểm tra trực tiếp dữ liệu RocksDB trên đĩa của Node 1 (sử dụng đoạn script python đọc cơ sở dữ liệu):
-        ```bash
-        python -c '
-        from storage.rocksdb_store import KVStore
-        store = KVStore(1)
-        print("Sổ cái Ledger tại Node 1:")
-        for tx in store.get_ledger():
-            print(f"  TX {tx[\"tx_id\"]}: {tx[\"data\"]}")
-        print("Số dư tài khoản hiện tại:")
-        for acc in ["A", "B", "C"]:
-            print(f"  {acc}: {store.get_balance(acc)}")
-        store.close()
-        '
-        ```
-    *   Kết quả hiển thị trên màn hình:
-        *   `A: 90`
-        *   `B: 105`
-        *   `C: 5`
-*   **Audio (Lời thoại thuyết minh):**
-    *   "Để chứng minh dữ liệu được lưu trữ bền vững và đồng nhất tuyệt đối, em sẽ chạy một đoạn mã Python truy vấn trực tiếp cơ sở dữ liệu RocksDB cục bộ của Node 1 trên đĩa."
-    *   "Kết quả trả về cho thấy Sổ cái chứa đầy đủ cả hai giao dịch đã commit. Số dư tài khoản được cập nhật chính xác: Tài khoản A còn 90 do đã chuyển 10, Tài khoản B nhận 10 rồi chuyển 5 còn 105, và Tài khoản C nhận 5."
-    *   "Như vậy, đồ án đã hoàn thành xuất sắc các yêu cầu kỹ thuật phân tán thực tế. Hệ thống giải quyết triệt để lỗi Byzantine độc hại nhờ giao thức PBFT 3 pha và bảo đảm an toàn lưu trữ đĩa cứng bền vững nhờ RocksDB LSM-Tree."
-    *   "Em xin chân thành cảm ơn Thầy/Cô và các bạn đã lắng nghe phần thuyết trình của em!"
+**Visual:**
+```bash
+# Terminal D:
+make up
+docker-compose ps
+```
+→ Hiển thị 4 container `node0..node3` đang `Up`
+
+```bash
+# Terminal A:
+docker-compose logs -f node0
+```
+→ Thấy log: `PBFT engine started`, `TCP Connection Pool started`, `Heartbeat thread started`
+
+**Lời thoại:**
+> *"Hệ thống gồm N=4 node. Với f=1 node lỗi tối đa chịu được, Quorum cần 2f+1 = 3 phiếu đồng thuận. Node 0 là Leader mặc định ở View 0. Em dùng Docker Compose để khởi chạy 4 container độc lập.*
+>
+> *Có thể thấy trong log: Connection Pool đang thiết lập socket TCP liên tục đến các node còn lại. Heartbeat PING/PONG cũng đang chạy ngầm để phát hiện node chết.*"
 
 ---
 
-## 💡 Mẹo nhỏ khi quay video:
-1.  **Chuẩn bị môi trường:** Hãy dọn dẹp các log và DB cũ bằng cách chạy `./run_demo.sh` một lần trước khi quay để đảm bảo các ổ đĩa sạch sẽ.
-2.  **Tốc độ gõ:** Nên chuẩn bị sẵn các dòng lệnh ra file nháp (Notepad) để chỉ cần copy-paste vào Terminal nhằm tiết kiệm thời gian và tránh gõ sai cú pháp khi nói.
-3.  **Hậu kỳ:** Bạn có thể phóng to (zoom) vùng Terminal hiển thị các log REDIRECT hoặc RECOVERY để người xem nhìn rõ các bằng chứng thực nghiệm quan trọng.
+## Phần 3: Kịch bản 1 — Giao dịch bình thường và Redirect (1:45 - 3:30)
+
+**Visual:**
+```bash
+# Terminal D: Mở TUI client
+python client_tui.py
+```
+→ Nhập: Node = `localhost:5001` (Backup), Sender = `A`, Receiver = `B`, Amount = `10`
+
+Chỉ vào log Terminal B (Node 1):
+```
+>>> [TCP Server 5001] Nhan message type=107 tu Node client
+>>> CLIENT_REQUEST nhan boi Backup Node 1 → REDIRECT ve Leader Node 0
+```
+
+Chỉ vào log Terminal A (Node 0):
+```
+>>> PBFT_PRE_PREPARE: tx_id=1 | Leader gui PRE-PREPARE (seq=1, view=0, digest=...)
+>>> PBFT_PREPARE_RX: Nhan PREPARE tu Node 1 (co 2/3)
+>>> PBFT_PREPARE_RX: Nhan PREPARE tu Node 2 (co 3/3)
+>>> PBFT SITE 0: TX 1 DA DUOC THUC THI (seq=1, view=0)
+```
+
+```bash
+# Kiểm tra DB sau giao dịch:
+python check_db.py
+```
+→ `A: 90, B: 110, Ledger: 1 giao dịch, tất cả 4 node đồng nhất`
+
+**Lời thoại:**
+> *"Em cố tình gửi giao dịch đến Node 1 — đây là Backup, không phải Leader. Node 1 phát hiện ngay và gửi thông báo REDIRECT chỉ định cổng của Leader về cho Client. Client tự động kết nối lại đến Node 0.*
+>
+> *Leader Node 0 ký và broadcast PRE-PREPARE kèm digest SHA-256 của giao dịch. Các Backup kiểm tra chữ ký, kiểm tra digest, rồi broadcast PREPARE. Sau khi Leader nhận đủ 2f+1=3 phiếu PREPARE — chuyển sang pha COMMIT. Sau 3 COMMIT, giao dịch được thực thi và ghi vào RocksDB.*
+>
+> *Em chạy script kiểm tra DB. Kết quả: tất cả 4 node đều ghi nhận A còn 90, B được 110 — tính nhất quán hoàn hảo.*"
+
+---
+
+## Phần 4: Kịch bản 2 — Crash và Crash Recovery (3:30 - 5:30)
+
+**Visual:**
+```bash
+# Terminal D: Tắt Node 1
+docker-compose stop node1
+docker-compose ps
+```
+→ Node 1 hiển thị `Exited`
+
+```bash
+# Gửi giao dịch tiếp theo (hệ thống còn 3 node vẫn đủ Quorum)
+python client_tui.py
+```
+→ Nhập: Node `localhost:5000`, Sender `B`, Receiver `C`, Amount `5`
+
+Chỉ vào log Terminal A:
+```
+>>> PBFT SITE 0: TX 2 DA DUOC THUC THI (seq=2, view=0)
+>>> CHECKPOINT_TRIGGER: Khoi tao checkpoint (seq=2, digest=...)
+>>> CHECKPOINT_STABLE: Checkpoint tai seq 2 da tro nen STABLE!
+```
+
+```bash
+# Bật lại Node 1
+docker-compose start node1
+sleep 3
+docker-compose logs --tail=20 node1
+```
+→ Thấy log:
+```
+>>> STARTUP: Phuc hoi tu checkpoint seq=0, balances={A:100,B:100,...}
+>>> RECOVERY: Replay WAL entry seq=1, tx_id=1 (A->B: 10)
+>>> RECOVERY: Replay WAL entry seq=2, tx_id=2 (B->C: 5)
+>>> Node 1 da phuc hoi day du!
+```
+
+```bash
+python check_db.py
+```
+→ `Node 1: A=90, B=105, C=5 — đồng nhất với phần còn lại`
+
+**Lời thoại:**
+> *"Em giả lập sự cố sập nguồn bằng cách cưỡng bức tắt container Node 1. Lúc này còn 3 node — vừa đủ Quorum 2f+1=3. Em gửi tiếp giao dịch 'B chuyển 5 cho C'. Hệ thống vẫn đạt đồng thuận và commit bình thường. Sau đó Checkpoint được kích hoạt và trở thành Stable Checkpoint.*
+>
+> *Em khởi động lại Node 1. Node 1 đọc Checkpoint mới nhất từ RocksDB, khôi phục World State, rồi scan WAL để replay lại hai giao dịch đã bỏ lỡ — theo đúng thứ tự sequence. Kết quả: Node 1 đồng nhất hoàn toàn với hệ thống trong vài giây.*"
+
+---
+
+## Phần 5: Kịch bản 3 — Byzantine Node và Safety (5:30 - 7:00)
+
+**Visual:**
+```bash
+# Dừng cluster cũ, chạy cluster Byzantine (Node 0 is_malicious=True)
+make down
+docker-compose -f docker-compose-byzantine.yml up -d
+docker-compose -f docker-compose-byzantine.yml logs -f
+```
+→ Thấy log Node 0:
+```
+>>> PBFT_BYZANTINE: Node 0 (Byzantine): thuc hien EQUIVOCATION tai seq 1!
+>>> PRE-PREPARE(digest=d1) → Node 1, 2
+>>> PRE-PREPARE(digest=d2, FAKE BYZANTINE) → Node 3
+```
+
+Thấy log Node 3:
+```
+>>> PBFT_DIGEST_MISMATCH: PREPARE digest sai tu Node 1 tai seq 1
+>>> PBFT_EQUIVOCATION: Equivocation tai seq 1: d1 != d2!
+>>> VIEW_CHANGE_START: Yeu cau view change tu 0 -> 1
+```
+
+Thấy log Node 1, 2, 3:
+```
+>>> NEW VIEW: Node 1 la leader cua view 1
+>>> SITE 1: DA CHUYEN SANG VIEW 1, LEADER = NODE 1
+```
+
+**Lời thoại:**
+> *"Kịch bản nghiêm trọng nhất: Leader Node 0 bị compromise, thực hiện tấn công Equivocation. Nó gửi hai PRE-PREPARE khác nhau cho cùng một Sequence Number — nội dung thật đến Node 1, 2 và nội dung giả đến Node 3.*
+>
+> *Kết quả: Node 3 nhận PREPARE từ Node 1 với digest sai → drop ngay lập tức, phát hiện Equivocation và kích hoạt View Change. Hệ thống bầu chọn Leader mới là Node 1 ở View 1. Giao dịch giả mạo không bao giờ đạt được Quorum — tính Safety được bảo đảm hoàn toàn.*"
+
+---
+
+## Phần 6: Tổng kết (7:00 - 8:00)
+
+**Visual:**
+- Hiển thị bảng so sánh Trước/Sau trong `ARCHITECTURAL_DECISIONS.md`
+- Hiển thị `REPORT_UPGRADE_PBFT.md` Chương III tóm tắt
+
+**Lời thoại:**
+> *"Tóm lại, hệ thống đã triển khai đầy đủ giao thức PBFT theo đặc tả gốc với ba tính chất cốt lõi: Safety — không bao giờ có hai node trung thực lưu trữ kết quả khác nhau; Liveness — hệ thống luôn tiến lên dù có node lỗi; và Durability — dữ liệu không bao giờ mất qua crash.*
+>
+> *Em xin chân thành cảm ơn Thầy/Cô đã lắng nghe. Em sẵn sàng trả lời câu hỏi.*"
+
+---
+
+## Lưu ý kỹ thuật khi quay
+
+1. **Zoom terminal** vào các dòng log `PBFT_DIGEST_MISMATCH`, `EQUIVOCATION`, `CHECKPOINT_STABLE` để khán giả thấy rõ.
+2. **Dùng `python check_db.py`** thay vì script python inline — gọn hơn, dễ nhìn hơn.
+3. **Chuẩn bị sẵn** các lệnh trong notepad, copy-paste để tránh typo.
+4. **Khoảng dừng** 2-3 giây sau mỗi lệnh để log kịp hiển thị trước khi nói.
+5. **Phần Byzantine:** nếu không có `docker-compose-byzantine.yml`, có thể sửa `config.py` set `is_malicious_nodes=[0]` và chạy `main.py` để reproduce.

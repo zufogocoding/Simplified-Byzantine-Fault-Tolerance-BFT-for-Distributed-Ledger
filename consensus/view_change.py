@@ -235,14 +235,15 @@ class ViewChangeManager:
             flush=True,
         )
 
-        # Exponential backoff cho timeout
-        self.view_change_timeout = self.pbft.base_view_change_timeout * (2 ** new_view)
+        # Exponential backoff cho timeout (gioi han toi da 8x base de tranh timeout vo han)
+        backoff = min(2 ** new_view, 8)
+        self.view_change_timeout = self.pbft.base_view_change_timeout * backoff
 
         # Null Request liveness (Neu O rong va la leader, gui 1 No-Op)
         if leader == self.sid and not O:
             self.log.info("NEW_VIEW_NULL", "Tap O rong, phat Null Request de khoi dong view moi")
             seq = self.pbft.sequence_manager.get_next_seq()
-            tx = {"tx_id": seq, "data": "NOOP", "client_id": "system"}
+            tx = {"tx_id": seq, "data": "NOOP", "client_id": "__noop__"}
             self.pbft._send_pre_prepare(tx, seq)
 
         # Redo PRE-PREPARE cho cac request trong O

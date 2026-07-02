@@ -125,11 +125,10 @@ class PBFTConsensus:
 
         # View change tracking
         self.view_change_sent = False
-        self.view_changes_received = set()
         self.base_view_change_timeout = TIMEOUT * 2.0
         self.view_change_timeout = self.base_view_change_timeout
         self.last_request_time = time.time()
-        
+
         # Client idempotency cache: client_id -> (timestamp, reply)
         self.client_replies = {}
 
@@ -825,7 +824,8 @@ class PBFTConsensus:
             if "client_id" in tx:
                 self.client_replies[tx["client_id"]] = (tx.get("timestamp", time.time()), reply)
         if client_conn:
-            self._reply_on_conn(client_conn, reply)
+            # Shallow copy tranh sign_message modify shared dict trong client_replies
+            self._reply_on_conn(client_conn, dict(reply))
             self.log.info("CLIENT_REPLY", f"Site {self.sid}: Gui CLIENT_REPLY (SUCCESS) cho {tx.get('client_id')} tren cung ket noi")
 
     # ============================================================

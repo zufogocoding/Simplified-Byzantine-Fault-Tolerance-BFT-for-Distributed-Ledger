@@ -1,110 +1,164 @@
-# 🌐 BFT Distributed Ledger — PBFT + RocksDB + TCP + Ed25519
+# BFT Distributed Ledger — PBFT + RocksDB + TCP + Ed25519
 
-He thong phan tan chiu loi Byzantine (PBFT) thuc te chay tren mang TCP thực, ho tro chu ky so Ed25519, co so du lieu RocksDB (WAL, state, ledger), checkpointing, va client gui giao dich doc lap.
+Hệ thống sổ cái phân tán chịu lỗi Byzantine (Practical Byzantine Fault Tolerance — PBFT) chạy trên mạng TCP thực, tích hợp chữ ký số Ed25519, cơ sở dữ liệu RocksDB (WAL, State, Ledger), cơ chế Checkpoint tự động, View Change với Prepared Certs, và client giao dịch độc lập.
 
----
-
-## 🛠️ Tinh Nang Noi Bat
-
-1. **Giao thuc PBFT day du (3 pha)**: Pre-prepare, Prepare, Commit. Chon Leader dua tren view (`view % N`).
-2. **Kiet tac bao mat (Ed25519)**: Toan bo cac tin nhan giua cac node deu duoc ky va xac thuc bang chu ky so Ed25519 that.
-3. **Ket noi TCP ben vung (Connection Pool)**: Su dung connection pool duy tri socket TCP mo lien tuc, tu dong ket noi lai khi gap loi mang.
-4. **Luu tru RocksDB**:
-   - Ghi WAL, state so du (balances), va ledger cac giao dich da commit.
-   - Luu va nap **State Checkpoint** moi $K=2$ giao dich de toi uu hoa khong gian luu tru va cat tia WAL/PBFT logs cu.
-   - Khoi phuc sau Crash (Crash Recovery) bang cach khoi phuc balance tu checkpoint va replay cac giao dich da commit trong WAL.
-5. **Heartbeat PING/PONG**: Dinh ky kiem tra suc khoe leader va tu dong nghi ngo de kich hoat View Change neu leader mat ket noi.
-6. **Client doc lap (`client.py`)**: Ky va gui giao dich directly. Ho tro redirect ve leader moi neu client ket noi sai node backup.
-7. **Kich ban kiem thu va tu dong hoa**: Makefile va `tests/integration_test.py` hoan toan tu dong.
+Hệ thống được xây dựng để phục vụ mục đích nghiên cứu và học thuật trong môn **Cơ sở dữ liệu phân tán**, có độ trung thực cao với đặc tả gốc của Castro & Liskov (1999).
 
 ---
 
-## 📁 Cau Truc Thu Muc
+## Tính năng nổi bật
+
+| Tính năng | Mô tả |
+|---|---|
+| **PBFT 3 pha đầy đủ** | Pre-prepare, Prepare, Commit với kiểm tra Digest và Watermark nghiêm ngặt |
+| **Chống Equivocation** | Phát hiện Leader Byzantine gửi Digest mâu thuẫn → kích hoạt View Change ngay lập tức |
+| **Chữ ký số Ed25519** | Mọi thông điệp giữa node và client đều được ký và xác thực trước khi xử lý |
+| **TCP Connection Pool** | Duy trì socket TCP mở liên tục, tự động kết nối lại khi mất mạng |
+| **Lưu trữ RocksDB** | WAL, World State, Ledger, PBFT logs, Checkpoint được lưu trên đĩa |
+| **Checkpoint + Pruning** | Chụp nhanh trạng thái mỗi K=2 giao dịch, cắt tỉa WAL cũ khi Stable Checkpoint đạt Quorum |
+| **Crash Recovery** | Khởi động lại từ Checkpoint + Replay WAL, chống duplicate ledger entries |
+| **View Change chuẩn** | VIEW-CHANGE kèm Prepared Certs, Leader mới phát lại PRE-PREPARE cho tập O |
+| **Exponential Backoff** | Timeout View Change tăng dần (tối đa 8x) để tránh vòng lặp liên tục khi mạng nghẽn |
+| **Client Idempotent** | Cache kết quả phía server, Client gửi lại request cũ nhận lại reply đã lưu |
+| **Null Request (NOOP)** | Leader mới phát NOOP khi tập O rỗng để chứng minh liveness |
+| **High/Low Watermarks** | Giới hạn cửa sổ Sequence Number, ngăn chặn Leader spam seq số rất lớn |
+| **TUI Client** | Giao diện nhập liệu tương tác (`client_tui.py`), tránh lỗi typo khi demo |
+
+---
+
+## Cấu trúc thư mục
 
 ```
 csdlpt/
-├── config.py                 # Cau hinh chung cua mang va crypto
-├── crypto_utils.py           # Ma hoa chu ky Ed25519 va Hash SHA-256
-├── logger.py                 # Logger ghi ra log file va console
+├── config.py                 # Cấu hình chung: node addresses, crypto keys, MsgType enum
+├── crypto_utils.py           # Ed25519 sign/verify thực, SHA-256 Digest
+├── logger.py                 # Structured logger ghi ra file log và console
+│
 ├── network/
-│   ├── __init__.py           # Giao tiep sign/verify va pool helpers
-│   ├── tcp_server.py         # TCP Server lang nghe ket noi dai han
-│   ├── tcp_client.py         # TCP Client gui tin nhan
-│   └── connection_pool.py    # TCP Connection Pool giu ket noi
+│   ├── __init__.py           # Helper: sign_message, verify_signature, net_send, net_broadcast
+│   ├── tcp_server.py         # TCP Server lắng nghe, buffer từng JSON line bằng delimiter \\n
+│   ├── tcp_client.py         # TCP Client gửi thông điệp đơn lẻ (fallback)
+│   └── connection_pool.py    # TCP Connection Pool duy trì socket liên tục, health-check bằng \\n
+│
 ├── storage/
-│   ├── __init__.py           # Expose store va WorldState
-│   ├── rocksdb_store.py      # RocksDB backend (WAL, State, Checkpoint, Ledger)
-│   └── world_state.py        # World State balances, checkpoint & replay logic
+│   ├── __init__.py           # Export KVStore
+│   └── rocksdb_store.py      # RocksDB backend: WAL, State, Ledger, Checkpoint, PBFT logs
+│
 ├── consensus/
 │   ├── __init__.py
-│   ├── pbft.py               # PBFT consensus state machine (3 pha, checkpoint)
-│   └── view_change.py        # View Change manager (prepared_certs, NEW-VIEW)
-├── node.py                   # Node entrypoint (chay che do demo hoac --listen)
-├── client.py                 # Client doc lap gui transaction va nhan reply
-├── main.py                   # Orchestrator chay demo mo phong localhost
-├── Dockerfile                # Dockerfile dong goi node chay Linux
-├── docker-compose.yml        # Khoi chay he thong 4 node qua Docker Compose
-├── simulate_network.sh       # Script tc-netem gia lap mat goi va do tre
-├── Makefile                  # Makefile tu dong hoa moi thao tac
+│   ├── pbft.py               # PBFT Engine: 3 pha, Watermarks, Digest check, Client cache
+│   └── view_change.py        # View Change Manager: Prepared Certs, NEW-VIEW, NOOP, Backoff
+│
+├── node.py                   # Node entry point: khởi động TCP server, PBFT, Heartbeat
+├── client.py                 # Client giao dịch dòng lệnh (CLI)
+├── client_tui.py             # Client giao dịch tương tác (TUI) — tránh typo khi demo
+├── check_db.py               # Script kiểm tra trực tiếp RocksDB trên đĩa
+├── main.py                   # Orchestrator chạy demo mô phỏng localhost
+│
+├── Dockerfile                # Docker image cho node
+├── docker-compose.yml        # Khởi chạy cluster 4 node qua Docker Compose
+├── simulate_network.sh       # Script tc-netem giả lập mất gói và độ trễ mạng
+├── demo.sh                   # Script demo kịch bản thủ công
+├── run_demo.sh               # Script 1-Click: reset, start Docker, gửi giao dịch
+├── Makefile                  # Tự động hóa: build, test, clean, up, down, demo
 └── tests/
-    ├── test_crypto.py        # Unit tests cho crypto
-    └── integration_test.py   # Integration tests cho he thong
+    ├── test_crypto.py        # Unit tests: sign/verify, compute_digest
+    └── integration_test.py   # Integration test: Happy Path, Redirect, RocksDB consistency
 ```
 
 ---
 
-## 🚀 Huong Dan Chay He Thong
+## Hướng dẫn chạy hệ thống
 
-### 1. Cai dat moi truong
-Yeu cau Python 3.8+ va cac goi dependencies trong `requirements.txt`:
+### 1. Cài đặt môi trường
+
+Yêu cầu Python 3.8+ và các gói trong `requirements.txt`:
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Chay demo mo phong cuc bo (Localhost)
-De chay nhanh demo mo phong 4 node thuc hien dong thuan tu dong (Site 0 Byzantine, Site 2 crash va recovery):
+### 2. Chạy demo mô phỏng cục bộ (Localhost)
+
+Chạy nhanh 4 node trên cùng máy, tự động thực hiện giao dịch và xác minh:
 ```bash
 python main.py
-# Hoac dung Makefile:
+# Hoặc dùng Makefile:
 make test
 ```
 
-### 3. Chay bang Docker Compose va Client
-Khoi chay he thong 4 container nodes duy tri listening:
+### 3. Chạy bằng Docker Compose
+
+Khởi động 4 container node lắng nghe TCP liên tục:
 ```bash
-# Build va start container
-make build
-make up
+make build    # Build Docker images
+make up       # Khởi chạy cluster 4 node
 ```
 
-Gui giao dich thong qua client doc lap tu ben ngoai:
+Gửi giao dịch qua CLI client:
 ```bash
-# Gui transaction (se tu dong redirect ve Leader Node 0 neu gui vao Node 1)
 python client.py --node localhost:5001 --op "A chuyen 10 cho B"
 ```
 
-Dung cum mang Docker:
+Gửi giao dịch qua TUI client (khuyến nghị khi demo):
+```bash
+python client_tui.py
+```
+
+Tắt cluster:
 ```bash
 make down
 ```
 
-### 4. Demo tu dong hoa toan bo (1-Click Demo)
-Script `run_demo.sh` se lam moi logs, khoi chay cum docker, dung client gui 3 giao dich va in ra ket qua ledger RocksDB cuoi cung:
+### 4. Kiểm tra trực tiếp dữ liệu RocksDB
+
+```bash
+python check_db.py
+```
+
+### 5. Demo 1-Click tự động
+
+Script `run_demo.sh` sẽ reset DB, khởi chạy Docker, gửi 3 giao dịch và in ledger cuối:
 ```bash
 make demo
 ```
 
 ---
 
-## 🧪 Kịch Bản Kiểm Thử Tích Hợp (`tests/integration_test.py`)
-Kịch bản test chay tu dong se:
-1. Reset rocksdb va logs.
-2. Spawn 4 nodes chay song song che do lang nghe.
-3. Chay client gui CLIENT_REQUEST den Node 1 (Backup) va xac minh node tu dong REDIRECT ve Node 0 (Leader).
-4. Xac minh client nhan du f+1 = 2 phieu SUCCESS hop le va commit.
-5. Tat cac nodes, doc truc tiep balances cua RocksDB site 0..3 de kiem tra tinh nhat quan (A: 90, B: 110, ledger: 1 giao dich).
+## Kịch bản kiểm thử tích hợp
 
-Chay kiem thu:
+File `tests/integration_test.py` tự động kiểm thử:
+
+1. Reset RocksDB và logs.
+2. Spawn 4 nodes lắng nghe TCP.
+3. Client gửi `CLIENT_REQUEST` đến Node 1 (Backup), xác minh Node 1 tự động `REDIRECT` về Leader Node 0.
+4. Xác minh client nhận đủ f+1 = 2 phiếu `SUCCESS` hợp lệ và commit thành công.
+5. Tắt nodes, đọc trực tiếp RocksDB tất cả sites để kiểm tra tính nhất quán (A: 90, B: 110, Ledger: 1 giao dịch).
+
 ```bash
 make test
 ```
+
+---
+
+## Thông số hệ thống
+
+| Thông số | Giá trị |
+|---|---|
+| Số node | N = 4 |
+| Số node lỗi tối đa chịu được | f = 1 |
+| Quorum Prepare/Commit | 2f+1 = 3 |
+| Quorum Checkpoint | 2f+1 = 3 |
+| Checkpoint interval | K = 2 giao dịch |
+| High Watermark | low + 100 sequences |
+| View Change base timeout | 2 × TIMEOUT |
+| View Change max backoff | 8 × base timeout |
+
+---
+
+## Lý thuyết nền tảng
+
+Hệ thống tuân thủ các thuộc tính cốt lõi của PBFT:
+
+- **Safety**: Không bao giờ có 2 node trung thực lưu trữ 2 kết quả khác nhau cho cùng một Sequence Number. Đảm bảo bởi Digest check nghiêm ngặt ở mọi pha và phát hiện Equivocation.
+- **Liveness**: Hệ thống luôn tiến lên phía trước. Đảm bảo bởi View Change, Null Request (NOOP) và Exponential Backoff.
+- **Byzantine Fault Tolerance**: Chịu được tối đa f = ⌊(N-1)/3⌋ node độc hại hoặc bị crash đồng thời, với N ≥ 3f+1 node.
