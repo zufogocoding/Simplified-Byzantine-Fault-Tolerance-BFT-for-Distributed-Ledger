@@ -189,4 +189,3 @@ def hash_message(msg_dict: dict) -> str:
     """
     msg_copy = {k: v for k, v in msg_dict.items() if k != "signature"}
     return compute_digest(pack_message(msg_copy))
-

@@ -41,17 +41,31 @@ class ViewChangeManager:
         return view % NUM_SITES
 
     def check_view_timeout(self, force=False):
-        """Kiem tra xem da den luc can view change chua."""
+        """Kiem tra xem da den luc can view change chua.
+        
+        View change CHI duoc kich hoat khi:
+        1. force=True: Heartbeat phat hien Leader chet (cap bach)
+        2. has_pending_request=True: Co request dang bi ket qua thoi gian
+        
+        KHONG kich hoat khi he thong idle (khong co request nao dang cho).
+        Day la hanh vi dung theo PBFT spec: timer chi chay khi co request pending.
+        """
         if self.pbft.shutdown.is_set():
             return
 
         now = time.time()
         time_since_last = now - self.pbft.last_request_time
 
-        if force or time_since_last > self.view_change_timeout:
-            if self.pbft.view_change_sent:
-                return  # Da gui view change roi
-            self._initiate_view_change()
+        # Heartbeat force-trigger: Leader khong con song
+        if force:
+            if not self.pbft.view_change_sent:
+                self._initiate_view_change()
+            return
+
+        # Chi kich hoat neu co request dang xu ly va da qua thoi gian cho
+        if self.pbft.has_pending_request and time_since_last > self.view_change_timeout:
+            if not self.pbft.view_change_sent:
+                self._initiate_view_change()
 
     def _initiate_view_change(self):
         """Bat dau view change: broadcast VIEW-CHANGE message kem prepared_certs."""

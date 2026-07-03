@@ -255,6 +255,49 @@ class KVStore:
                         continue
             return logs
 
+    def get_pbft_logs_grouped_by_seq(self, above_seq: int) -> dict:
+        """Lay toan bo PBFT logs (pre_prepare, prepare, commit) cho seq > above_seq, nhom theo seq.
+        
+        Tra ve: {seq: {"pre_prepare": msg, "prepare": [msg1, msg2, ...], "commit": [msg1, msg2, ...]}}
+        """
+        with self.lock:
+            grouped = {}
+            for k, v in self.db.items():
+                if k.startswith(b"pbft_log::"):
+                    try:
+                        key_str = k.decode("utf-8")
+                        parts = key_str.split("::")
+                        # pbft_log::<log_type>::<seq>::<digest>::<sender>
+                        log_type = parts[1]
+                        seq = int(parts[2])
+                        if seq <= above_seq:
+                            continue
+                        msg = json.loads(v)
+                        if seq not in grouped:
+                            grouped[seq] = {"pre_prepare": None, "prepare": [], "commit": []}
+                        if log_type == "pre_prepare":
+                            grouped[seq]["pre_prepare"] = msg
+                        elif log_type == "prepare":
+                            grouped[seq]["prepare"].append(msg)
+                        elif log_type == "commit":
+                            grouped[seq]["commit"].append(msg)
+                    except (json.JSONDecodeError, TypeError, ValueError, IndexError):
+                        continue
+            return grouped
+
+    def get_pbft_logs_by_seq_digest(self, log_type: str, seq: int, digest: str) -> list:
+        """Doc PBFT logs cho mot (seq, digest) cu the."""
+        with self.lock:
+            prefix = f"pbft_log::{log_type}::{seq}::{digest}::".encode()
+            logs = []
+            for k, v in self.db.items():
+                if k.startswith(prefix):
+                    try:
+                        logs.append(json.loads(v))
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+            return logs
+
     def delete_old_pbft_logs(self, below_seq: int):
         """Xoa PBFT logs duoi sequence duoc chi dinh."""
         with self.lock:

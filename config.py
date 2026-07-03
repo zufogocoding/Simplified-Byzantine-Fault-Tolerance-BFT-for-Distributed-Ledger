@@ -21,16 +21,19 @@ from typing import Dict, List, Optional, Tuple
 
 class TxState(str):
     """Trang thai cua mot giao dich trong BFT state machine."""
+
     pass
 
 
 class Vote(str):
     """Phieu bau va quyet dinh cuoi cung."""
+
     pass
 
 
 class MsgType(IntEnum):
     """Loai message trong giao thuc BFT."""
+
     # Original message types (Phase 1-3)
     VOTE = 1
     REQ = 2
@@ -49,6 +52,8 @@ class MsgType(IntEnum):
     PONG = 110
     SYNC_REQUEST = 111
     SYNC_RESPONSE = 112
+    SYNC_MISSING_REQUEST = 113
+    SYNC_MISSING_RESPONSE = 114
 
 
 # Gia tri trang thai (backward-compatible)
@@ -77,6 +82,8 @@ MSG_PING = MsgType.PING
 MSG_PONG = MsgType.PONG
 MSG_SYNC_REQUEST = MsgType.SYNC_REQUEST
 MSG_SYNC_RESPONSE = MsgType.SYNC_RESPONSE
+MSG_SYNC_MISSING_REQUEST = MsgType.SYNC_MISSING_REQUEST
+MSG_SYNC_MISSING_RESPONSE = MsgType.SYNC_MISSING_RESPONSE
 
 
 # ============================================================
@@ -189,8 +196,8 @@ PUBLIC_KEYS_BYTES = {
     sid: bytes.fromhex(hex_str) for sid, hex_str in config.public_keys.items()
 }
 
-MALICIOUS_SITE = config.malicious_sites[0]
-CRASH_SITE = list(config.crash_config.keys())[0]   # 2
+MALICIOUS_SITE = config.malicious_sites[0] if config.malicious_sites else None
+CRASH_SITE = list(config.crash_config.keys())[0]  # 2
 CRASH_ON_TX = list(config.crash_config.values())[0]  # 1
 
 # Tao thu muc luu tru

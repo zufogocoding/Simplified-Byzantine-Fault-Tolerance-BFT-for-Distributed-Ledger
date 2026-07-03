@@ -12,13 +12,13 @@ help:
 	@echo "  make clean   - Don dep database RocksDB, files log va cache"
 
 build:
-	docker-compose build
+	podman-compose build
 
 up:
-	docker-compose up -d
+	podman-compose up -d
 
 down:
-	docker-compose down
+	podman-compose down
 
 demo:
 	./run_demo.sh

@@ -25,6 +25,7 @@ from config import (
     MSG_PING, MSG_PONG, MSG_CHECKPOINT,
     MSG_CLIENT_REQUEST, MSG_CLIENT_REPLY,
     MSG_SYNC_REQUEST, MSG_SYNC_RESPONSE,
+    MSG_SYNC_MISSING_REQUEST, MSG_SYNC_MISSING_RESPONSE,
 )
 from network import sign_message, verify_signature, net_send, net_broadcast
 from crypto_utils import compute_digest, hash_message
@@ -42,6 +43,8 @@ MSG_PING_TYPE = MsgType.PING
 MSG_PONG_TYPE = MsgType.PONG
 MSG_CLIENT_REQUEST_TYPE = MsgType.CLIENT_REQUEST
 MSG_CLIENT_REPLY_TYPE = MsgType.CLIENT_REPLY
+MSG_SYNC_MISSING_REQUEST = MsgType.SYNC_MISSING_REQUEST
+MSG_SYNC_MISSING_RESPONSE = MsgType.SYNC_MISSING_RESPONSE
 
 logger = logging.getLogger(__name__)
 
@@ -128,12 +131,22 @@ class PBFTConsensus:
         self.base_view_change_timeout = TIMEOUT * 2.0
         self.view_change_timeout = self.base_view_change_timeout
         self.last_request_time = time.time()
+        # True khi co request dang cho xu ly (chua execute)
+        # View change chi nen kich hoat khi co request bi ket, khong phai khi idle
+        self.has_pending_request = False
 
         # Client idempotency cache: client_id -> (timestamp, reply)
         self.client_replies = {}
 
+        self.is_syncing = False
+
         # Heartbeat tracking
         self.last_seen = {i: time.time() for i in range(NUM_SITES)}
+        # Peer sync tracking: last known view va seq cua tung peer (tu PONG)
+        self.peer_views = {i: self.view for i in range(NUM_SITES)}
+        self.peer_seqs = {i: self.last_executed_seq for i in range(NUM_SITES)}
+        # Flag yeu cau kiem tra sync dinh ky (set boi heartbeat check)
+        self._sync_check_requested = threading.Event()
 
         # Luu ket noi TCP cua client de reply tren cung socket
         self.client_connections = {}  # seq -> socket
@@ -200,15 +213,147 @@ class PBFTConsensus:
         hb_thread = threading.Thread(target=self._heartbeat_loop, daemon=True, name=f"Heartbeat-{self.sid}")
         hb_thread.start()
 
+        # Khoi phuc self.requests tu PBFT logs trong RocksDB
+        self._reconstruct_requests_from_logs()
+
         # Dong bo view voi peers sau restart
         self._sync_with_peers()
+
+        # Neu con request dang do dang pending, danh dau de view change co the kich hoat
+        has_pending = self._has_pending_unexecuted_requests()
+        if has_pending:
+            self.has_pending_request = True
+            self.log.info("RECOVERY_PENDING", f"Site {self.sid}: Phat hien {has_pending} request chua duoc thuc thi, danh has_pending_request=True")
+            # Neu da co du prepare quorum tu log, gui COMMIT ngay
+            self._reprocess_reconstructed_requests()
+
+        # Khoi dong thread kiem tra sync dinh ky dam bao auto-sync
+        sync_thread = threading.Thread(target=self._sync_check_loop, daemon=True, name=f"SyncCheck-{self.sid}")
+        sync_thread.start()
+
+    def _has_pending_unexecuted_requests(self) -> int:
+        """Dem so luong request trong self.requests co seq > last_executed_seq."""
+        count = 0
+        with self.lock:
+            for seq in self.requests:
+                if seq > self.last_executed_seq:
+                    count += 1
+        return count
+
+    def _reprocess_reconstructed_requests(self):
+        """Xu lai cac request da duoc reconstruct: gui COMMIT neu du PREPARE quorum, hoac execute neu du COMMIT."""
+        with self.lock:
+            for seq in list(self.requests.keys()):
+                if seq <= self.last_executed_seq:
+                    continue
+                req = self.requests[seq]
+                if req.get("decision") is not None:
+                    continue
+                # Kiem tra COMMIT quorum
+                commits = req.get("commits", set())
+                if len(commits) >= QUORUM:
+                    req["decision"] = VOTE_COMMIT
+                    req["phase"] = "executed" if req.get("phase") != "executed" else req["phase"]
+                    self.store.put_wal(req["tx_id"], VOTE_COMMIT, VOTE_COMMIT, tx_data=req["tx"])
+                    self.log.info("PBFT_RECOVERY_EXECUTE",
+                                  f"Reconstruct: tx_id={req['tx_id']} da du {QUORUM} COMMIT, thuc thi...")
+                    self._execute_request(req["tx"], seq)
+                    if seq % 2 == 0:
+                        self._trigger_checkpoint(seq)
+                    continue
+                # Kiem tra PREPARE quorum
+                prepares = req.get("prepares", {})
+                if len(prepares) >= QUORUM:
+                    phase = req.get("phase", "")
+                    if phase != "prepare_ready" and phase != "commit" and phase != "executed":
+                        req["phase"] = "prepare_ready"
+                        self.log.info("PBFT_RECOVERY_COMMIT",
+                                      f"Reconstruct: tx_id={req['tx_id']} da du {QUORUM} PREPARE, gui COMMIT...")
+                        # Gui COMMIT va ghi log
+                        self._send_commit(seq, req["tx_id"], req["digest"])
+
+    def _reconstruct_requests_from_logs(self):
+        """Khoi phuc self.requests tu RocksDB PBFT logs cho cac seq > last_executed_seq."""
+        self.log.info("RECONSTRUCT_START",
+                      f"Site {self.sid}: Bat dau khoi phuc requests tu PBFT logs (last_seq={self.last_executed_seq})")
+
+        logs_grouped = self.store.get_pbft_logs_grouped_by_seq(self.last_executed_seq)
+        if not logs_grouped:
+            self.log.info("RECONSTRUCT_EMPTY", "Site %s: Khong co PBFT logs de khoi phuc" % self.sid)
+            return
+
+        reconstructed = 0
+        with self.lock:
+            for seq in sorted(logs_grouped.keys()):
+                if seq <= self.last_executed_seq:
+                    continue
+                group = logs_grouped[seq]
+                pre_prepare = group.get("pre_prepare")
+                if pre_prepare is None:
+                    continue
+
+                tx = pre_prepare.get("request")
+                tx_id = pre_prepare.get("tx_id")
+                digest = pre_prepare.get("digest")
+                view = pre_prepare.get("view", self.view)
+
+                # Kiem tra da co trong ledger chua (tranh trung lap)
+                ledger = self.store.get_ledger()
+                ledger_tx_ids = set(t.get("tx_id") for t in ledger)
+                if tx_id in ledger_tx_ids:
+                    self.last_executed_seq = max(self.last_executed_seq, seq)
+                    continue
+
+                # Khoi phuc prepares dict: chi chap nhan prepare cung digest
+                prepares = {}
+                for prepare_msg in group.get("prepare", []):
+                    p_sender = prepare_msg.get("sender")
+                    p_digest = prepare_msg.get("digest")
+                    if p_digest == digest and p_sender is not None:
+                        prepares[p_sender] = True
+
+                # Khoi phuc commits set
+                commits = set()
+                for commit_msg in group.get("commit", []):
+                    c_sender = commit_msg.get("sender")
+                    c_digest = commit_msg.get("digest")
+                    if c_digest == digest and c_sender is not None:
+                        commits.add(c_sender)
+
+                # Xac dinh phase dua tren so luong votes
+                if len(commits) >= QUORUM:
+                    phase = "executed"
+                elif len(prepares) >= QUORUM:
+                    phase = "prepare"
+                else:
+                    phase = "pre_prepare"
+
+                self.requests[seq] = {
+                    "tx": tx,
+                    "tx_id": tx_id,
+                    "digest": digest,
+                    "view": view,
+                    "pre_prepare": True,
+                    "prepares": prepares,
+                    "commits": commits,
+                    "decision": VOTE_COMMIT if phase == "executed" else None,
+                    "phase": phase,
+                }
+
+                reconstructed += 1
+                self.log.info("RECONSTRUCT_SEQ",
+                              f"Khoi phuc requests[{seq}]: tx_id={tx_id}, phase={phase}, "
+                              f"prepares={len(prepares)}, commits={len(commits)}")
+
+        self.log.info("RECONSTRUCT_DONE",
+                      f"Site {self.sid}: Da khoi phuc {reconstructed} requests tu PBFT logs")
 
     def _heartbeat_loop(self):
         """Gui PING dinh ky va kiem tra song/chet cua leader."""
         while not self.shutdown.is_set():
             time.sleep(1.5)
-            # Broadcast PING den tat ca cac node
-            net_broadcast(self.sid, MSG_PING, tx_id=0)
+            # Broadcast PING den tat ca cac node (kem view hien tai de node cham tu dong sync)
+            net_broadcast(self.sid, MSG_PING, tx_id=0, view=self.view)
 
             # Kiem tra leader hien tai
             leader = get_leader(self.view)
@@ -221,8 +366,47 @@ class PBFTConsensus:
                         "Leader Node %d khong phan hoi trong %.2f giay (co the da chet)"
                         % (leader, time_since_leader_seen),
                     )
-                    # Giam last_request_time de view-change manager kich hoat som
-                    self.last_request_time = now - (TIMEOUT * 3)
+                    # Kich hoat view change ngay - leader da chet
+                    if self.view_change:
+                        self.view_change.check_view_timeout(force=True)
+
+    def _sync_check_loop(self):
+        """Thread dinh ky kiem tra va yeu cau dong bo neu phat hien node bi tut lai."""
+        while not self.shutdown.is_set():
+            time.sleep(15)  # Kiem tra moi 15 giay
+
+            # Bo qua neu dang sync
+            if self.is_syncing:
+                continue
+
+            # Kiem tra xem co peer nao co view/seq cao hon khong
+            max_peer_view = max(self.peer_views.values()) if self.peer_views else self.view
+            max_peer_seq = max(self.peer_seqs.values()) if self.peer_seqs else self.last_executed_seq
+
+            can_sync = False
+            if max_peer_view > self.view:
+                self.log.info("SYNC_CHECK",
+                              f"Phat hien peer co view {max_peer_view} > current view {self.view}")
+                can_sync = True
+            elif max_peer_seq > self.last_executed_seq + 1:
+                self.log.info("SYNC_CHECK",
+                              f"Phat hien peer co seq {max_peer_seq} > current seq {self.last_executed_seq}")
+                can_sync = True
+            elif self._has_pending_unexecuted_requests() > 0:
+                # Co request dang doi nhung khong co tien trien -> can sync
+                self.log.info("SYNC_CHECK",
+                              f"Co {self._has_pending_unexecuted_requests()} request pending, kich hoat sync")
+                can_sync = True
+
+            if can_sync:
+                # Broadcast SYNC_REQUEST de bat dau qua trinh dong bo
+                self.log.info("SYNC_CHECK_TRIGGER", "Broadcast SYNC_REQUEST de dong bo...")
+                for dst in range(NUM_SITES):
+                    if dst == self.sid:
+                        continue
+                    from network import net_send
+                    net_send(self.sid, dst, MSG_SYNC_REQUEST, 0,
+                             current_view=self.view, last_seq=self.last_executed_seq)
 
     # ============================================================
     # PEER SYNC — Khoi phuc view & seq sau restart
@@ -264,6 +448,11 @@ class PBFTConsensus:
                                   f"Nhan SYNC_RESPONSE tu Node {msg.get('sender')}: view={pv}, last_seq={ps}")
                 elif mtype == MSG_SYNC_REQUEST:
                     self._handle_sync_request(msg)
+                elif mtype == MSG_SYNC_MISSING_REQUEST:
+                    self._handle_sync_missing_request(msg)
+                elif mtype == MSG_SYNC_MISSING_RESPONSE:
+                    replies.append(msg)
+                    self.log.info("SYNC_MISSING_RESPONSE", f"Nhan SYNC_MISSING_RESPONSE tu Node {msg.get('sender')}")
                 elif mtype == MSG_PING:
                     self._handle_ping(msg)
                 elif mtype == MSG_PONG:
@@ -298,6 +487,140 @@ class PBFTConsensus:
         self.log.info("SYNC_DONE",
                       f"Node {self.sid}: Hoan tat dong bo (view={self.view}, last_seq={self.last_executed_seq}, {len(replies)}/{NUM_SITES-1} peers phan hoi)")
 
+        # Dong bo cac transaction bi thieu tu peers
+        if max_peer_seq > self.last_executed_seq:
+            self._request_missing_transactions(self.last_executed_seq + 1, max_peer_seq)
+
+    def _request_missing_transactions(self, seq_min: int, seq_max: int):
+        """Yeu cau peers gui transaction data cho cac sequence bi thieu."""
+        # Kiem tra xem nhung seq nao thuc su can request (khong co pre_prepare log)
+        existing_logs = self.store.get_pbft_logs_grouped_by_seq(self.last_executed_seq)
+        missing_seqs = []
+        for s in range(seq_min, seq_max + 1):
+            group = existing_logs.get(s)
+            if group is None or group.get("pre_prepare") is None:
+                missing_seqs.append(s)
+
+        if not missing_seqs:
+            self.log.info("SYNC_MISSING_NONE", f"Khong co seq nao bi thieu trong [{seq_min}, {seq_max}]")
+            return
+
+        self.log.info("SYNC_MISSING_START",
+                      f"Yeu cau {len(missing_seqs)} missing transactions tu peers: {missing_seqs}")
+
+        # Request tu peers (chon peer co view cao nhat hoac broadcast)
+        from network import net_send
+        for dst in range(NUM_SITES):
+            if dst == self.sid:
+                continue
+            net_send(self.sid, dst, MSG_SYNC_MISSING_REQUEST, 0,
+                     seq_min=seq_min, seq_max=seq_max,
+                     missing_seqs=missing_seqs)
+
+        # Cho phan hoi tu peers trong 3 giay
+        missing_responses = []
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            try:
+                msg = self.incoming_queue.get(timeout=0.5)
+                mtype = msg.get("type")
+                if mtype == MSG_SYNC_MISSING_RESPONSE:
+                    missing_responses.append(msg)
+                elif mtype == MSG_SYNC_REQUEST:
+                    self._handle_sync_request(msg)
+                elif mtype == MSG_PING:
+                    self._handle_ping(msg)
+                elif mtype == MSG_PONG:
+                    self._handle_pong(msg)
+                else:
+                    # Tra lai vao queue cho process_messages
+                    import queue as qmod
+                    try:
+                        self.incoming_queue.put(msg)
+                    except qmod.Full:
+                        pass
+            except Exception:
+                continue
+
+        # Xu ly cac missing responses
+        received_txs = 0
+        with self.lock:
+            for resp in missing_responses:
+                transactions = resp.get("transactions", {})
+                for seq_str, pre_prepare in transactions.items():
+                    seq = int(seq_str)
+                    if seq <= self.last_executed_seq:
+                        continue
+                    if seq in self.requests:
+                        continue
+                    tx = pre_prepare.get("request")
+                    tx_id = pre_prepare.get("tx_id")
+                    digest = pre_prepare.get("digest")
+                    if tx is None or digest is None:
+                        continue
+                    self.requests[seq] = {
+                        "tx": tx,
+                        "tx_id": tx_id,
+                        "digest": digest,
+                        "view": pre_prepare.get("view", self.view),
+                        "pre_prepare": True,
+                        "prepares": {self.sid: True},
+                        "commits": set(),
+                        "decision": None,
+                        "phase": "pre_prepare",
+                    }
+                    received_txs += 1
+                    self.log.info("SYNC_MISSING_TX",
+                                  f"Nhan duoc transaction thieu: seq={seq}, tx_id={tx_id}")
+
+        if received_txs > 0:
+            self.log.info("SYNC_MISSING_DONE",
+                          f"Da nhan duoc {received_txs}/{len(missing_seqs)} transaction bi thieu")
+        else:
+            self.log.info("SYNC_MISSING_FAIL",
+                          f"Khong nhan duoc transaction nao trong {len(missing_seqs)} yeu cau")
+
+    def _handle_sync_missing_request(self, msg: dict):
+        """Tra loi SYNC_MISSING_REQUEST: gui transaction data cho peer dang phuc hoi."""
+        sender = msg.get("sender")
+        seq_min = msg.get("seq_min", 0)
+        seq_max = msg.get("seq_max", 0)
+        missing_seqs = msg.get("missing_seqs", [])
+
+        self.log.info("SYNC_MISSING_REQUEST_RX",
+                      f"Nhan SYNC_MISSING_REQUEST tu Node {sender}: seq_range=[{seq_min},{seq_max}]")
+
+        # Thu thap pre_prepare messages cho cac seq duoc yeu cau
+        transactions = {}
+        logs_grouped = self.store.get_pbft_logs_grouped_by_seq(self.last_executed_seq)
+        for seq in missing_seqs:
+            group = logs_grouped.get(seq)
+            if group and group.get("pre_prepare"):
+                transactions[str(seq)] = group["pre_prepare"]
+            else:
+                # Neu khong co trong RocksDB, kiem tra in-memory
+                with self.lock:
+                    if seq in self.requests and self.requests[seq].get("tx"):
+                        pre_prepare_msg = {
+                            "sender": self.sid,
+                            "seq": seq,
+                            "tx_id": self.requests[seq]["tx_id"],
+                            "view": self.requests[seq]["view"],
+                            "digest": self.requests[seq]["digest"],
+                            "request": self.requests[seq]["tx"],
+                        }
+                        transactions[str(seq)] = pre_prepare_msg
+
+        from network import net_send
+        net_send(self.sid, sender, MSG_SYNC_MISSING_RESPONSE, 0,
+                 transactions=transactions)
+        self.log.info("SYNC_MISSING_RESPONSE_TX",
+                      f"Gui {len(transactions)} transaction cho Node {sender}")
+
+    def _handle_sync_missing_response(self, msg: dict):
+        """Xu ly SYNC_MISSING_RESPONSE (da duoc xu ly trong _request_missing_transactions)."""
+        pass
+
     def _handle_sync_request(self, msg: dict):
         """Tra loi SYNC_REQUEST: gui view va last_seq hien tai cho node yeu cau."""
         sender = msg.get("sender")
@@ -308,18 +631,49 @@ class PBFTConsensus:
                  current_view=self.view, last_seq=self.last_executed_seq)
 
     def _handle_sync_response(self, msg: dict):
-        """Xu ly SYNC_RESPONSE tu peer (da duoc xu ly trong _sync_with_peers)."""
-        pass  # Da xu ly trong _sync_with_peers qua incoming_queue
+        """Xu ly SYNC_RESPONSE tu peer: update peer tracking, trigger sync neu can."""
+        sender = msg.get("sender")
+        pv = msg.get("current_view", 0)
+        ps = msg.get("last_seq", 0)
+
+        # Cap nhat tracking
+        with self.lock:
+            self.peer_views[sender] = pv
+            self.peer_seqs[sender] = ps
+
+        self.log.info("SYNC_RESPONSE_RX",
+                      f"Nhan SYNC_RESPONSE tu Node {sender}: view={pv}, last_seq={ps}")
+
+        # Neu peer co view/seq cao hon dang ke va minh khong dang sync, kich hoat sync
+        if not self.is_syncing:
+            need_sync = False
+            if pv > self.view:
+                need_sync = True
+            if ps > self.last_executed_seq + 2:  # Tre hon 2 seq can sync
+                need_sync = True
+            if need_sync:
+                self.log.info("SYNC_RESPONSE_TRIGGER",
+                              f"Node {sender} co view={pv}, seq={ps} > minh (view={self.view}, seq={self.last_executed_seq}). "
+                              "Kich hoat dong bo lai...")
+                self._sync_with_peers()
 
     def _handle_ping(self, msg: dict):
-        """Tra loi tin nhan PING bang PONG."""
+        """Tra loi tin nhan PING bang PONG kem view va last_seq hien tai."""
         sender = msg.get("sender")
-        net_send(self.sid, sender, MSG_PONG, tx_id=0)
+        net_send(self.sid, sender, MSG_PONG, tx_id=0,
+                 current_view=self.view, last_seq=self.last_executed_seq)
 
     def _handle_pong(self, msg: dict):
-        """Cap nhat thoi gian phan hoi PONG cua mot node."""
+        """Cap nhat thoi gian phan hoi PONG cua mot node, va track view/seq cua peer."""
         sender = msg.get("sender")
         self.last_seen[sender] = time.time()
+        # Track view va seq cua peer de phat hien co can sync khong
+        pv = msg.get("current_view")
+        ps = msg.get("last_seq")
+        if pv is not None:
+            self.peer_views[sender] = pv
+        if ps is not None:
+            self.peer_seqs[sender] = ps
 
     # ============================================================
     # HANDLE INCOMING MESSAGES
@@ -330,6 +684,19 @@ class PBFTConsensus:
         Tiep nhan va xu ly mot message.
         """
         msg_type = msg.get("type")
+        msg_view = msg.get("view")
+
+        # Neu phat hien tin nhan tu peer co view lon hon view hien tai,
+        # node can phai bat kip (catch up) bang cach dong bo lai tu dau.
+        if msg_view is not None and msg_view > self.view:
+            with self.lock:
+                if not self.is_syncing:
+                    self.is_syncing = True
+                    self.log.info("SYNC_CATCHUP_TRIGGER", f"Phat hien tin nhan tu Node {msg.get('sender')} co view {msg_view} > current view {self.view}. Tien hanh dong bo...")
+                    try:
+                        self._sync_with_peers()
+                    finally:
+                        self.is_syncing = False
 
         # Xac thuc chu ky: Neu khong phai CLIENT_REQUEST thi kiem tra chu ky cua node
         if msg_type != MSG_CLIENT_REQUEST:
@@ -357,6 +724,10 @@ class PBFTConsensus:
             self._handle_sync_request(msg)
         elif msg_type == MSG_SYNC_RESPONSE:
             self._handle_sync_response(msg)
+        elif msg_type == MSG_SYNC_MISSING_REQUEST:
+            self._handle_sync_missing_request(msg)
+        elif msg_type == MSG_SYNC_MISSING_RESPONSE:
+            self._handle_sync_missing_response(msg)
         elif msg_type == MSG_PING:
             self._handle_ping(msg)
         elif msg_type == MSG_PONG:
@@ -574,6 +945,7 @@ class PBFTConsensus:
                 with self.lock:
                     self.client_connections[seq] = client_conn
             self.log.info("CLIENT_REQUEST", f"Leader nhan CLIENT_REQUEST tu {client_id}: {op} -> gan seq={seq}")
+            self.has_pending_request = True  # Danh dau co request dang xu ly
             self._send_pre_prepare(tx, seq)
         else:
             # Backup: gui REDIRECT tren cung ket noi TCP
@@ -808,6 +1180,7 @@ class PBFTConsensus:
 
         print(">>> PBFT SITE %d: TX %d DA DUOC THUC THI (seq=%d, view=%d) <<<" % (self.sid, tx_id, seq, self.view), flush=True)
         self.last_request_time = time.time()
+        self.has_pending_request = False  # Request da hoan thanh, tat timer view change
         self.last_executed_seq = max(self.last_executed_seq, seq)
         # Persist last_seq vao RocksDB sau moi lan thuc thi
         self.store.save_last_seq(self.last_executed_seq)

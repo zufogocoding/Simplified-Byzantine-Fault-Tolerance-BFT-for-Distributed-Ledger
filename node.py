@@ -17,19 +17,31 @@ import logging
 # Cau hinh logging de in ra stdout/stderr cho tung node
 logging.basicConfig(
     level=logging.DEBUG,
-    format='[%(asctime)s] %(levelname)s [%(name)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="[%(asctime)s] %(levelname)s [%(name)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 
 from config import (
-    config, NUM_SITES, QUORUM, TIMEOUT, NET_MIN, NET_MAX, LISTEN_AFTER,
-    NODE_ADDRESSES, TRANSACTIONS, VOTE_COMMIT, MSG_REQ,
+    config,
+    NUM_SITES,
+    QUORUM,
+    TIMEOUT,
+    NET_MIN,
+    NET_MAX,
+    LISTEN_AFTER,
+    NODE_ADDRESSES,
+    TRANSACTIONS,
+    VOTE_COMMIT,
+    MSG_REQ,
 )
 from logger import Logger
 from storage.rocksdb_store import KVStore
 from network import (
-    sign_message, verify_signature, net_send, net_broadcast,
-    register_connection_pool
+    sign_message,
+    verify_signature,
+    net_send,
+    net_broadcast,
+    register_connection_pool,
 )
 from network.tcp_server import TCPServer
 from consensus.pbft import PBFTConsensus
@@ -41,8 +53,13 @@ class Node:
     Dai dien cho mot node BFT voi PBFT consensus.
     """
 
-    def __init__(self, sid: int, is_malicious: bool = False,
-                 crash_on_tx: int = None, shutdown_event=None):
+    def __init__(
+        self,
+        sid: int,
+        is_malicious: bool = False,
+        crash_on_tx: int = None,
+        shutdown_event=None,
+    ):
         self.sid = sid
         self.is_malicious = is_malicious
         self.crash_on_tx = crash_on_tx
@@ -54,14 +71,18 @@ class Node:
         self.log = Logger(sid)
         self.store = KVStore(sid)
         self.incoming_queue = self.tcp_server.incoming_queue
-        
+
         # Khoi tao connection pool
         self.pool = register_connection_pool(sid, NODE_ADDRESSES)
 
         # PBFT engine
         self.pbft = PBFTConsensus(
-            sid, self.incoming_queue, self.store, self.log, self.shutdown,
-            is_malicious=self.is_malicious
+            sid,
+            self.incoming_queue,
+            self.store,
+            self.log,
+            self.shutdown,
+            is_malicious=self.is_malicious,
         )
         self.view_change = ViewChangeManager(sid, self.log, self.pbft)
         self.pbft.view_change = self.view_change
@@ -71,7 +92,7 @@ class Node:
         self.tcp_server.start()
         self.pool.start_connections()
         self.pbft.start()
-        
+
         role = "BYZANTINE (equivocation)" if self.is_malicious else "Trung thuc"
         self.log.info("STARTUP", "Vai tro: %s | PBFT Engine: %s" % (role, self.pbft))
         print(
@@ -105,6 +126,7 @@ class Node:
             while not self.shutdown.is_set():
                 self.view_change.check_view_timeout()
                 time.sleep(1.0)
+
         vc_thread = threading.Thread(target=check_view_change, daemon=True)
         vc_thread.start()
 
@@ -144,7 +166,17 @@ if __name__ == "__main__":
         sys.exit(1)
 
     sid = int(sys.argv[1])
-    is_malicious = (sid in config.malicious_sites) and ("--no-byzantine" not in sys.argv)
+    listen_mode = "--listen" in sys.argv
+
+    if listen_mode:
+        # Che do Docker/listen: luon chay honest de demo giao dich binh thuong
+        # Muon demo Byzantine, dung: python main.py (chay qua orchestrator)
+        is_malicious = False
+    else:
+        is_malicious = (sid in config.malicious_sites) and (
+            "--no-byzantine" not in sys.argv
+        )
+
     crash_on_tx = config.crash_config.get(sid)
 
     node = Node(sid, is_malicious=is_malicious, crash_on_tx=crash_on_tx)
@@ -153,7 +185,7 @@ if __name__ == "__main__":
     if "--listen" in sys.argv:
         # Che do chay lau dai cho client gui giao dich tu ben ngoai (Docker)
         print(f"[Node {sid}] Dang chay che do lang nghe lien tuc...", flush=True)
-        
+
         # Start message processing thread
         msg_thread = threading.Thread(target=node.pbft.process_messages, daemon=True)
         msg_thread.start()
@@ -163,6 +195,7 @@ if __name__ == "__main__":
             while not node.shutdown.is_set():
                 node.view_change.check_view_timeout()
                 time.sleep(1.0)
+
         vc_thread = threading.Thread(target=check_view_change, daemon=True)
         vc_thread.start()
 
@@ -175,12 +208,11 @@ if __name__ == "__main__":
         # Che do demo cu chay qua danh sach giao dich co san va dung
         time.sleep(1)
         node.process_transactions(TRANSACTIONS)
-        
+
         ledger = node.get_ledger()
         node.log.info("LEDGER_FINAL", "So cai: %d giao dich" % len(ledger))
         print(
-            "[Node %d] Ket thuc. Ledger co %d giao dich."
-            % (sid, len(ledger)),
+            "[Node %d] Ket thuc. Ledger co %d giao dich." % (sid, len(ledger)),
             flush=True,
         )
         time.sleep(2)
